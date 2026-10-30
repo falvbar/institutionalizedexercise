@@ -1,0 +1,10957 @@
+---
+title: "Which exercise and how much? Comparative effectiveness and dose–response of exercise interventions in institutionalized older adults: A systematic review and Bayesian network meta-analysis"
+
+---
+
+
+## 0_Libraries 
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+library(tidyverse)
+library(readxl)
+library(ggthemes)
+library(tidybayes)
+library(brms)
+library(marginaleffects)
+library(ggsci)
+library(multinma)
+options(mc.cores = parallel::detectCores())
+library(splines)
+library(cowplot)
+library(patchwork)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(purrr)
+
+```
+
+## 0_Import the dataset
+
+```{r}
+data <- read_xlsx(path = "YOUR PATH",
+                  col_names = TRUE, na = "")
+```
+
+## 0_data clean
+
+```{r} 
+data <- data %>%
+  mutate(
+    scale = stringr::str_trim(scale),
+    outcome = stringr::str_trim(outcome),
+    agent = stringr::str_trim(agent),
+    trt = stringr::str_trim(trt)
+  )
+```
+
+
+## PHYSICAL FUNCTION
+### GAIT SPEED # Lower is better = FALSE
+## 1_filter domain 
+
+```{r} 
+pf_vmarcha <- data %>%
+  filter(
+    outcome == "physical function",
+    scale %in% c("10MWT(m/s)", "6_m_walk(m/s)", "Gait4", "Gait_pref") 
+  ) %>%
+  mutate(
+    y = as.numeric(y),
+    se = as.numeric(se),
+    postn = as.numeric(postn),
+    premean = as.numeric(premean),
+    weekly_dose = as.numeric(weekly_dose)
+  )
+```
+
+
+## 2_Cheking networks and models
+
+```{r} 
+pf_vmarcha %>%
+  count(studyID, scale, agent, trt)
+
+pf_vmarcha %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+    n_scales = n_distinct(scale),
+    n_agents = n_distinct(agent),
+    missing_y = sum(is.na(y)),
+    missing_se = sum(is.na(se)),
+    missing_postn = sum(is.na(postn)),
+    missing_premean = sum(is.na(premean))
+  )
+
+unique(pf_vmarcha$scale)
+unique(pf_vmarcha$agent)
+unique(pf_vmarcha$trt)
+
+pf_vmarcha %>%
+  count(studyID) %>%
+  arrange(n)
+
+```
+
+### Meta-Analysis Model For Agent
+
+## 3_Creation red_Agent
+
+```{r}
+mean_premean_vmarcha <- mean(pf_vmarcha$premean, na.rm = TRUE)
+
+pf_vmarcha <- pf_vmarcha %>%
+  mutate(premean_c = premean - mean_premean_vmarcha)
+
+
+net_agent <- set_agd_arm(
+  pf_vmarcha,
+  study = studyID,
+  trt = agent,
+  y = y,
+  se = se,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+net_agent
+plot(net_agent, weight_edges = TRUE, weight_nodes = TRUE)  
+
+plot(net_agent, weight_edges = TRUE, weight_nodes = TRUE) +
+  theme(legend.position = "bottom")
+
+
+```
+
+## 4_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+fit_FE_vmarcha_agent <- nma(
+  net_agent,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1)
+)
+
+fit_FE_vmarcha_agent
+
+```
+
+## 5_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_vmarcha_agent <- nma(
+  net_agent,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5)
+)
+
+fit_RE_vmarcha_agent
+
+```
+
+## 6_Model 3:Fixed-effect meta-analysis with covariate `premean`
+
+```{r}
+fit_FE_reg_vmarcha_agent <- nma(
+  net_agent,
+  seed = 25062026,
+  trt_effects = "fixed",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  adapt_delta = 0.99
+)
+
+fit_FE_reg_vmarcha_agent
+
+
+```
+
+## 7_Model 4:Random-effects meta-analysis with covariate `premean`
+
+```{r}
+fit_RE_reg_vmarcha_agent <- nma(
+  net_agent,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_RE_reg_vmarcha_agent
+
+```
+
+## 8_Model comparation
+
+```{r}
+
+dic_FE_vmarcha <- dic(fit_FE_vmarcha_agent)
+dic_RE_vmarcha <- dic(fit_RE_vmarcha_agent)
+dic_FE_reg_vmarcha <- dic(fit_FE_reg_vmarcha_agent)
+dic_RE_reg_vmarcha <- dic(fit_RE_reg_vmarcha_agent)
+
+dic_FE_vmarcha
+dic_RE_vmarcha
+dic_FE_reg_vmarcha
+dic_RE_reg_vmarcha
+
+model_comparison_vmarcha <- tibble(
+  model = c(
+    "Fixed-effect",
+    "Random-effects",
+    "Fixed-effect + premean",
+    "Random-effects + premean"
+  ),
+  DIC = c(
+    dic_FE_vmarcha$dic,
+    dic_RE_vmarcha$dic,
+    dic_FE_reg_vmarcha$dic,
+    dic_RE_reg_vmarcha$dic
+  ),
+  residual_deviance = c(
+    dic_FE_vmarcha$resdev,
+    dic_RE_vmarcha$resdev,
+    dic_FE_reg_vmarcha$resdev,
+    dic_RE_reg_vmarcha$resdev
+  )
+)
+
+model_comparison_vmarcha
+
+
+```
+
+## 9_check
+
+```{r}
+plot(dic_FE_vmarcha)
+plot(dic_RE_vmarcha)
+plot(dic_FE_reg_vmarcha)
+plot(dic_RE_reg_vmarcha)
+
+```
+
+
+## 10_model choose
+
+```{r}
+fit_main_vmarcha_agent <- fit_RE_reg_vmarcha_agent 
+dic_main_vmarcha_agent <- dic_RE_reg_vmarcha
+
+```
+
+
+## 11_relative effects
+
+```{r}
+pf_vmarcha %>%
+  summarise(
+    min_premean = min(premean, na.rm = TRUE),
+    mean_premean = mean(premean, na.rm = TRUE),
+    median_premean = median(premean, na.rm = TRUE),
+    max_premean = max(premean, na.rm = TRUE)
+  )
+
+
+rel_effect_vmarcha_agent <- relative_effects(
+  fit_main_vmarcha_agent,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline gait speed",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rel_effect_vmarcha_agent
+
+plot(rel_effect_vmarcha_agent, ref_line = 0, stat = "halfeye")
+
+
+
+summary(fit_main_vmarcha_agent) 
+rel_effect_vmarcha_agent
+
+
+```
+
+
+## 12_general Ranking
+
+```{r}
+rank_vmarcha_agent <- posterior_ranks(
+  fit_main_vmarcha_agent,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline gait speed",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rank_vmarcha_agent
+plot(rank_vmarcha_agent)
+
+rank_vmarcha_agent
+
+```
+
+
+## 15_rank probabilities
+
+```{r}
+rank_probs_cum_vmarcha_agent <- posterior_rank_probs(
+  fit_main_vmarcha_agent,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline gait speed",
+    premean_c = 0
+  ),
+  study = studyID,
+  cumulative = TRUE
+)
+
+rank_probs_cum_vmarcha_agent
+plot(rank_probs_cum_vmarcha_agent)
+
+
+```
+
+
+## 17_Checking for inconsistency
+
+```{r}
+
+fit_UME_RE_reg_vmarcha_agent <- nma(
+  net_agent,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  consistency = "ume",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_reg_vmarcha_agent
+summary(fit_UME_RE_reg_vmarcha_agent)
+
+dic_UME_RE_reg_vmarcha_agent <- dic(fit_UME_RE_reg_vmarcha_agent)
+
+dic_main_vmarcha_agent
+dic_UME_RE_reg_vmarcha_agent
+
+inconsistency_comparison_vmarcha_agent <- tibble(
+  model = c(
+    "Consistency: random-effects + premean_c",
+    "UME: random-effects + premean_c"
+  ),
+  DIC = c(
+    dic_main_vmarcha_agent$dic,
+    dic_UME_RE_reg_vmarcha_agent$dic
+  ),
+  residual_deviance = c(
+    dic_main_vmarcha_agent$resdev,
+    dic_UME_RE_reg_vmarcha_agent$resdev
+  )
+)
+
+inconsistency_comparison_vmarcha_agent
+
+plot(
+  dic_main_vmarcha_agent,
+  dic_UME_RE_reg_vmarcha_agent,
+  show_uncertainty = FALSE
+)
+
+
+```
+
+
+## 20_posterior predictive distribution
+
+```{r}
+
+rel_effect_pred_vmarcha_agent <- relative_effects(
+  fit_main_vmarcha_agent,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline gait speed",
+    premean_c = 0
+  ),
+  study = studyID,
+  predictive_distribution = TRUE
+)
+
+rel_effect_pred_vmarcha_agent
+
+prob_harm_vmarcha_agent <- colMeans(
+  as.matrix(rel_effect_pred_vmarcha_agent) < 0
+)
+
+prob_harm_vmarcha_agent
+
+
+```
+
+
+### Meta-Analysis Model For Trt
+
+## 21_Creation red_Trt
+
+```{r}
+
+mean_premean_vmarcha <- mean(pf_vmarcha$premean, na.rm = TRUE)
+
+pf_vmarcha <- pf_vmarcha %>%
+  mutate(
+    premean_c = premean - mean_premean_vmarcha)
+
+
+pf_vmarcha <- pf_vmarcha %>%
+  mutate(
+    trt = case_when(
+      trt == "Tai Chi" ~ "mind body",
+      trt == "Yoga" ~ "mind body",
+      trt == "theraband" ~ "resistance training",
+      trt == "dance" ~ "aerobic",
+      trt == "mix aerobic" ~ "aerobic",
+      trt ==  "virtual reality" ~ "exergame",
+      trt ==  "aerobic+resistance+stretching" ~ "aerobic+resistance",
+      TRUE ~ trt
+    )
+  )
+
+net_trt <- set_agd_arm(
+  pf_vmarcha,
+  study = studyID,
+  trt = trt,
+  y = y,
+  se = se,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+net_trt
+summary(net_trt)
+
+pf_vmarcha %>%
+  count(trt, sort = TRUE)
+
+plot(net_trt, weight_edges = TRUE, weight_nodes = TRUE) +
+  theme(legend.position = "bottom")
+
+
+```
+
+## 22_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+fit_FE_vmarcha <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1)
+)
+
+fit_FE_vmarcha
+
+```
+
+## 23_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_vmarcha <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5)
+)
+
+fit_RE_vmarcha
+
+
+```
+
+## 24_Model 3:Fixed-effect meta-analysis with covariate `premean`
+
+```{r}
+fit_FE_reg_vmarcha <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "fixed",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  adapt_delta = 0.99
+)
+
+fit_FE_reg_vmarcha
+
+```
+
+## 25_Model 4:Random-effects meta-analysis with covariate `premean`
+
+```{r}
+fit_RE_reg_vmarcha <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_RE_reg_vmarcha
+
+```
+
+## 26_Model comparation
+
+```{r}
+dic_FE_vmarcha <- dic(fit_FE_vmarcha)
+dic_RE_vmarcha <- dic(fit_RE_vmarcha)
+dic_FE_reg_vmarcha <- dic(fit_FE_reg_vmarcha)
+dic_RE_reg_vmarcha <- dic(fit_RE_reg_vmarcha)
+
+dic_FE_vmarcha
+dic_RE_vmarcha
+dic_FE_reg_vmarcha
+dic_RE_reg_vmarcha
+
+
+
+model_comparison_vmarcha <- tibble(
+  model = c(
+    "Fixed-effect",
+    "Random-effects",
+    "Fixed-effect + premean",
+    "Random-effects + premean"
+  ),
+  DIC = c(
+    dic_FE_vmarcha$dic,
+    dic_RE_vmarcha$dic,
+    dic_FE_reg_vmarcha$dic,
+    dic_RE_reg_vmarcha$dic
+  ),
+  residual_deviance = c(
+    dic_FE_vmarcha$resdev,
+    dic_RE_vmarcha$resdev,
+    dic_FE_reg_vmarcha$resdev,
+    dic_RE_reg_vmarcha$resdev
+  )
+)
+
+model_comparison_vmarcha
+
+
+```
+
+## 27_check
+
+```{r}
+plot(dic_FE_vmarcha)
+plot(dic_RE_vmarcha)
+plot(dic_FE_reg_vmarcha)
+plot(dic_RE_reg_vmarcha)
+
+```
+
+
+## 28_model choose
+
+```{r}
+fit_main_vmarcha <- fit_RE_reg_vmarcha
+dic_main_vmarcha <- dic_RE_reg_vmarcha
+
+```
+
+
+## 29_relative effects
+
+```{r}
+pf_vmarcha %>%
+  summarise(
+    min_premean = min(premean, na.rm = TRUE),
+    mean_premean = mean(premean, na.rm = TRUE),
+    median_premean = median(premean, na.rm = TRUE),
+    max_premean = max(premean, na.rm = TRUE)
+  )
+
+
+rel_effect_vmarcha <- relative_effects(
+  fit_main_vmarcha,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline gait speed",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rel_effect_vmarcha
+
+plot(rel_effect_vmarcha, ref_line = 0, stat = "halfeye")
+
+
+summary(fit_main_vmarcha) 
+rel_effect_vmarcha
+
+```
+
+
+## 30_general Ranking
+
+```{r}
+rank_vmarcha <- posterior_ranks(
+  fit_main_vmarcha,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline gait speed",
+    premean_c = 0),
+study = studyID)
+
+rank_vmarcha
+plot(rank_vmarcha)
+
+
+rank_vmarcha
+
+```
+
+
+## 33_rank probabilities
+
+```{r}
+rank_probs_cum_vmarcha <- posterior_rank_probs(
+  fit_main_vmarcha,
+  lower_better = FALSE,
+  newdata = tibble(studyID = "Mean baseline gait speed",
+    premean_c = 0),
+study = studyID,
+  cumulative = TRUE
+)
+
+rank_probs_cum_vmarcha
+plot(rank_probs_cum_vmarcha)
+
+```
+
+
+## 35_Checking for inconsistency
+
+```{r}
+fit_UME_RE_reg_vmarcha <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  consistency = "ume",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_reg_vmarcha
+summary(fit_UME_RE_reg_vmarcha)
+
+dic_UME_RE_reg_vmarcha <- dic(fit_UME_RE_reg_vmarcha)
+
+dic_main_vmarcha
+dic_UME_RE_reg_vmarcha
+
+inconsistency_comparison_vmarcha <- tibble(
+  model = c(
+    "Consistency: random-effects + premean_c",
+    "UME: random-effects + premean_c"
+  ),
+  DIC = c(
+    dic_main_vmarcha$dic,
+    dic_UME_RE_reg_vmarcha$dic
+  ),
+  residual_deviance = c(
+    dic_main_vmarcha$resdev,
+    dic_UME_RE_reg_vmarcha$resdev
+  )
+)
+
+inconsistency_comparison_vmarcha
+
+
+plot(
+  dic_main_vmarcha,
+  dic_UME_RE_reg_vmarcha,
+  show_uncertainty = FALSE
+)
+```
+
+
+## 38_posterior predictive distribution
+
+```{r}
+
+
+rel_effect_pred_vmarcha <- relative_effects(
+  fit_main_vmarcha,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline gait speed",
+    premean_c = 0
+  ),
+  study = studyID,
+  predictive_distribution = TRUE
+)
+
+rel_effect_pred_vmarcha
+
+prob_harm_vmarcha <- colMeans(
+  as.matrix(rel_effect_pred_vmarcha) < 0
+)
+
+prob_harm_vmarcha
+
+
+```
+
+### dose response overall 
+
+## 39_checking data
+
+```{r}
+## 39_checking data
+
+pf_vmarcha_overall <- data %>%
+  filter(
+    outcome == "physical function",
+    scale %in% c("10MWT(m/s)", "6_m_walk(m/s)", "Gait4", "Gait_pref")
+  ) %>%
+  mutate(
+    y = as.numeric(y),
+    se = as.numeric(se),
+    postn = as.numeric(postn),
+    premean = as.numeric(premean),
+    weekly_dose = as.numeric(weekly_dose)
+  )
+
+
+
+pf_vmarcha_overall %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+    missing_weekly_dose = sum(is.na(weekly_dose)),
+    missing_y = sum(is.na(y)),
+    missing_se = sum(is.na(se)),
+    missing_postn = sum(is.na(postn)),
+    min_dose = min(weekly_dose, na.rm = TRUE),
+    p25_dose = quantile(weekly_dose, 0.25, na.rm = TRUE),
+    median_dose = median(weekly_dose, na.rm = TRUE),
+    mean_dose = mean(weekly_dose, na.rm = TRUE),
+    p75_dose = quantile(weekly_dose, 0.75, na.rm = TRUE),
+    max_dose = max(weekly_dose, na.rm = TRUE),
+    n_unique_dose = n_distinct(weekly_dose, na.rm = TRUE)
+  )
+
+
+pf_vmarcha_overall %>%
+  filter(agent == "usual care") %>%
+  summarise(
+    n_usual_care = n(),
+    n_dose_zero = sum(weekly_dose == 0, na.rm = TRUE),
+    n_dose_missing = sum(is.na(weekly_dose))
+  )
+
+
+pf_vmarcha_overall %>%
+  filter(agent != "usual care") %>%
+  summarise(
+    missing_weekly_dose_exercise = sum(is.na(weekly_dose)),
+    min_exercise_dose = min(weekly_dose, na.rm = TRUE),
+    p25_exercise_dose = quantile(weekly_dose, 0.25, na.rm = TRUE),
+    median_exercise_dose = median(weekly_dose, na.rm = TRUE),
+    mean_exercise_dose = mean(weekly_dose, na.rm = TRUE),
+    p75_exercise_dose = quantile(weekly_dose, 0.75, na.rm = TRUE),
+    max_exercise_dose = max(weekly_dose, na.rm = TRUE)
+  )
+
+
+pf_vmarcha_overall <- pf_vmarcha_overall %>%
+  mutate(
+    overall = if_else(
+      agent == "usual care",
+      "usual care",
+      "exercise"
+    )
+  )
+
+
+pf_vmarcha_overall %>%
+  count(overall)
+
+
+```
+
+## 40_exploratory graph overall
+
+```{r}
+## 40_exploratory graph overall
+
+if (!all(c("weekly_dose", "y", "overall") %in% names(pf_vmarcha_overall))) {
+  stop(
+    "`pf_vmarcha_overall` no colums: ",
+    "'weekly_dose', 'y' y 'overall'"
+  )
+}
+
+
+pf_vmarcha_overall_dose <- pf_vmarcha_overall %>%
+  filter(
+    overall == "exercise",
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+lin_plot_vmarcha <- ggplot(
+  pf_vmarcha_overall_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_point() +
+  geom_smooth(method = "lm", colour = "blue") +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Change in gait speed (m/s)",
+    title = "Linear regression"
+  ) +
+  theme_minimal()
+
+loess_plot_vmarcha <- ggplot(
+  pf_vmarcha_overall_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_point() +
+  geom_smooth(method = "loess", colour = "gold") +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Change in gait speed (m/s)",
+    title = "LOESS"
+  ) +
+  theme_minimal()
+
+spline2_plot_vmarcha <- ggplot(
+  pf_vmarcha_overall_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ splines::ns(x, df = 2),
+    colour = "red"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Change in gait speed (m/s)",
+    title = "Natural spline, 2 df"
+  ) +
+  theme_minimal()
+
+spline3_plot_vmarcha <- ggplot(
+  pf_vmarcha_overall_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ splines::ns(x, df = 3),
+    colour = "black"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Change in gait speed (m/s)",
+    title = "Natural spline, 3 df"
+  ) +
+  theme_minimal()
+
+gridExtra::grid.arrange(
+  lin_plot_vmarcha,
+  loess_plot_vmarcha,
+  spline2_plot_vmarcha,
+  spline3_plot_vmarcha,
+  nrow = 2
+)
+
+
+```
+
+## 41_statistical comprobation overall
+
+```{r}
+library(dplyr)
+library(splines)
+library(tibble)
+
+lm_simple_vmarcha_overall <- lm(
+  y ~ weekly_dose,
+  data = pf_vmarcha_overall_dose
+)
+
+lm_spline2_vmarcha_overall <- lm(
+  y ~ ns(weekly_dose, df = 2),
+  data = pf_vmarcha_overall_dose
+)
+
+lm_spline3_vmarcha_overall <- lm(
+  y ~ ns(weekly_dose, df = 3),
+  data = pf_vmarcha_overall_dose
+)
+
+anova_lin_ns2_vmarcha <- anova(
+  lm_simple_vmarcha_overall,
+  lm_spline2_vmarcha_overall
+)
+
+anova_lin_ns3_vmarcha <- anova(
+  lm_simple_vmarcha_overall,
+  lm_spline3_vmarcha_overall
+)
+
+anova_ns2_ns3_vmarcha <- anova(
+  lm_spline2_vmarcha_overall,
+  lm_spline3_vmarcha_overall
+)
+
+stats_overall_vmarcha <- tibble(
+  outcome = "Gait speed",
+  n = nrow(pf_vmarcha_overall_dose),
+  n_unique_dose = n_distinct(
+    pf_vmarcha_overall_dose$weekly_dose
+  ),
+
+  p_linear =
+    summary(lm_simple_vmarcha_overall)$coefficients[
+      "weekly_dose",
+      "Pr(>|t|)"
+    ],
+
+  p_linear_vs_ns2 =
+    anova_lin_ns2_vmarcha$`Pr(>F)`[2],
+
+  p_linear_vs_ns3 =
+    anova_lin_ns3_vmarcha$`Pr(>F)`[2],
+
+  p_ns2_vs_ns3 =
+    anova_ns2_ns3_vmarcha$`Pr(>F)`[2],
+
+  AIC_linear =
+    AIC(lm_simple_vmarcha_overall),
+
+  AIC_ns2 =
+    AIC(lm_spline2_vmarcha_overall),
+
+  AIC_ns3 =
+    AIC(lm_spline3_vmarcha_overall),
+
+  adjR2_linear =
+    summary(lm_simple_vmarcha_overall)$adj.r.squared,
+
+  adjR2_ns2 =
+    summary(lm_spline2_vmarcha_overall)$adj.r.squared,
+
+  adjR2_ns3 =
+    summary(lm_spline3_vmarcha_overall)$adj.r.squared
+)
+
+stats_overall_vmarcha
+
+
+```
+
+## 42_categorical groups
+
+```{r}
+## 42_categorical groups
+
+pf_vmarcha_overall_cat <- pf_vmarcha_overall %>%
+  filter(
+    !is.na(weekly_dose),
+    !is.na(y)
+  ) %>%
+  mutate(
+    dose_group = cut(
+      weekly_dose,
+      breaks = c(-Inf, 0, 500, 1000, Inf),
+      labels = c(
+        "Usual care",
+        "Low dose",
+        "Medium dose",
+        "High dose"
+      ),
+      right = TRUE
+    )
+  )
+
+
+pf_vmarcha_overall_cat %>%
+  group_by(dose_group) %>%
+  summarise(
+    n_arms = n(),
+    n_studies = n_distinct(studyID),
+    min_dose = min(weekly_dose, na.rm = TRUE),
+    max_dose = max(weekly_dose, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+lm_cat_vmarcha_overall <- aov(
+  y ~ dose_group,
+  data = pf_vmarcha_overall_cat
+)
+
+summary(lm_cat_vmarcha_overall)
+
+
+TukeyHSD(lm_cat_vmarcha_overall)
+
+```
+
+## 43_optimal dose
+
+```{r}
+
+
+lm_selected_vmarcha_overall <- lm(
+  y ~ weekly_dose,
+  data = pf_vmarcha_overall_dose
+)
+
+summary(lm_selected_vmarcha_overall)
+
+
+confint(
+  lm_selected_vmarcha_overall,
+  level = 0.95
+)
+
+
+coef_vmarcha <- summary(lm_selected_vmarcha_overall)$coefficients
+
+beta_vmarcha <- coef_vmarcha["weekly_dose", "Estimate"]
+
+se_vmarcha <- coef_vmarcha["weekly_dose", "Std. Error"]
+
+p_vmarcha <- coef_vmarcha["weekly_dose", "Pr(>|t|)"]
+
+ci_vmarcha <- confint(
+  lm_selected_vmarcha_overall,
+  "weekly_dose"
+)
+
+cat(
+  "Slope (β):", round(beta_vmarcha, 6), "\n",
+  "95% CI:", round(ci_vmarcha[1], 6), "to",
+  round(ci_vmarcha[2], 6), "\n",
+  "P-value:", signif(p_vmarcha, 3), "\n"
+)
+
+
+```
+
+## 44_optimal dose graph overall
+
+```{r}
+
+dose_grid_vmarcha <- tibble(
+  weekly_dose = seq(
+    min(pf_vmarcha_overall_dose$weekly_dose, na.rm = TRUE),
+    max(pf_vmarcha_overall_dose$weekly_dose, na.rm = TRUE),
+    length.out = 200
+  )
+)
+
+pred_vmarcha <- predict(
+  lm_selected_vmarcha_overall,
+  newdata = dose_grid_vmarcha,
+  interval = "confidence",
+  level = 0.95
+)
+
+pred_df_vmarcha <- dose_grid_vmarcha %>%
+  mutate(
+    predicted = pred_vmarcha[, "fit"],
+    lower = pred_vmarcha[, "lwr"],
+    upper = pred_vmarcha[, "upr"]
+  )
+
+ggplot(
+  pf_vmarcha_overall_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_point(alpha = 0.6) +
+  geom_ribbon(
+    data = pred_df_vmarcha,
+    aes(
+      x = weekly_dose,
+      ymin = lower,
+      ymax = upper
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.20
+  ) +
+  geom_line(
+    data = pred_df_vmarcha,
+    aes(
+      x = weekly_dose,
+      y = predicted
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    x = "Weekly exercise dose (MET-min/week)",
+    y = "Change in gait speed (m/s)",
+    title = "Linear dose–response relationship for gait speed",
+    subtitle = "Predicted mean change with 95% confidence interval"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+
+## 44.1_dose response overall 2-degree-of-freedom spline_
+
+```{r}
+
+
+dose_grid_vmarcha_spline2 <- tibble(
+  weekly_dose = seq(
+    min(pf_vmarcha_overall_dose$weekly_dose, na.rm = TRUE),
+    max(pf_vmarcha_overall_dose$weekly_dose, na.rm = TRUE),
+    length.out = 200
+  )
+)
+
+
+pred_spline2_vmarcha <- predict(
+  lm_spline2_vmarcha_overall,
+  newdata = dose_grid_vmarcha_spline2,
+  interval = "confidence",
+  level = 0.95
+)
+
+pred_df_spline2_vmarcha <- dose_grid_vmarcha_spline2 %>%
+  mutate(
+    predicted = pred_spline2_vmarcha[, "fit"],
+    lower = pred_spline2_vmarcha[, "lwr"],
+    upper = pred_spline2_vmarcha[, "upr"]
+  )
+
+
+
+peak_row_spline2_vmarcha <- pred_df_spline2_vmarcha %>%
+  slice_max(
+    order_by = predicted,
+    n = 1,
+    with_ties = FALSE
+  )
+
+peak_dose_spline2_vmarcha <- peak_row_spline2_vmarcha$weekly_dose
+peak_effect_spline2_vmarcha <- peak_row_spline2_vmarcha$predicted
+
+cat(
+  "Exploratory peak dose within the observed range:",
+  round(peak_dose_spline2_vmarcha, 0),
+  "\n"
+)
+
+cat(
+  "Maximum predicted change in gait speed:",
+  round(peak_effect_spline2_vmarcha, 3),
+  "m/s\n"
+)
+
+
+
+p_vmarcha_spline2_exploratory <- ggplot(
+  pf_vmarcha_overall_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_point(alpha = 0.6) +
+  geom_ribbon(
+    data = pred_df_spline2_vmarcha,
+    aes(
+      x = weekly_dose,
+      ymin = lower,
+      ymax = upper
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.20
+  ) +
+  geom_line(
+    data = pred_df_spline2_vmarcha,
+    aes(
+      x = weekly_dose,
+      y = predicted
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_vline(
+    xintercept = peak_dose_spline2_vmarcha,
+    linetype = "dotted"
+  ) +
+  annotate(
+    "text",
+    x = peak_dose_spline2_vmarcha,
+    y = peak_effect_spline2_vmarcha,
+    label = paste0(
+      "Exploratory maximum:\n",
+      round(peak_dose_spline2_vmarcha, 0),
+      " MET-min/week"
+    ),
+    hjust = -0.05,
+    vjust = -0.5
+  ) +
+  labs(
+    x = "Weekly exercise dose (MET-min/week)",
+    y = "Change in gait speed (m/s)",
+    title = "Exploratory non-linear dose–response relationship for gait speed",
+    subtitle = paste0(
+      "Natural spline with 2 degrees of freedom; ",
+      "the linear model was retained as the primary model"
+    )
+  ) +
+  theme_minimal()
+
+p_vmarcha_spline2_exploratory
+
+
+```
+
+
+
+### dose response Agent
+
+## 45.0_dose response Agent_ESTADISTICA DE MODELOS_statistical model
+
+```{r}
+
+
+library(dplyr)
+library(splines)
+library(purrr)
+
+pf_vmarcha_dose_agent <- pf_vmarcha_overall %>%
+  filter(
+    agent != "usual care",
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+agent_split_vmarcha <- split(
+  pf_vmarcha_dose_agent,
+  pf_vmarcha_dose_agent$agent
+)
+
+summary_agent_vmarcha <- map_dfr(names(agent_split_vmarcha), function(agent_name){
+
+  datos <- agent_split_vmarcha[[agent_name]]
+
+  n_studies <- n_distinct(datos$studyID)
+  n_unique_dose <- n_distinct(datos$weekly_dose)
+
+  if(n_studies < 3 | n_unique_dose < 3){
+
+    return(
+      tibble(
+        agent = agent_name,
+        n_studies = n_studies,
+        n_unique_dose = n_unique_dose,
+        p_linear = NA,
+        p_linear_vs_ns2 = NA,
+        p_linear_vs_ns3 = NA,
+        p_ns2_vs_ns3 = NA,
+        AIC_linear = NA,
+        AIC_ns2 = NA,
+        AIC_ns3 = NA,
+        adjR2_linear = NA,
+        selected_model = "Not modelled"
+      )
+    )
+
+  }
+
+  lm_lin <- lm(
+    y ~ weekly_dose,
+    data = datos
+  )
+
+  lm_ns2 <- lm(
+    y ~ ns(weekly_dose, df = 2),
+    data = datos
+  )
+
+  lm_ns3 <- lm(
+    y ~ ns(weekly_dose, df = 3),
+    data = datos
+  )
+
+  tibble(
+
+    agent = agent_name,
+
+    n_studies = n_studies,
+
+    n_unique_dose = n_unique_dose,
+
+    p_linear =
+      summary(lm_lin)$coefficients["weekly_dose","Pr(>|t|)"],
+
+    p_linear_vs_ns2 =
+      anova(lm_lin,lm_ns2)$`Pr(>F)`[2],
+
+    p_linear_vs_ns3 =
+      anova(lm_lin,lm_ns3)$`Pr(>F)`[2],
+
+    p_ns2_vs_ns3 =
+      anova(lm_ns2,lm_ns3)$`Pr(>F)`[2],
+
+    AIC_linear = AIC(lm_lin),
+
+    AIC_ns2 = AIC(lm_ns2),
+
+    AIC_ns3 = AIC(lm_ns3),
+
+    adjR2_linear =
+      summary(lm_lin)$adj.r.squared
+
+  )
+
+}) %>%
+
+  mutate(
+
+    selected_model = case_when(
+
+      is.na(p_linear) ~ "Not modelled",
+
+      p_linear_vs_ns2 < 0.05 &
+      (is.na(p_ns2_vs_ns3) | p_ns2_vs_ns3 >= 0.05) ~ "Spline 2",
+
+      p_linear_vs_ns3 < 0.05 &
+      p_ns2_vs_ns3 < 0.05 ~ "Spline 3",
+
+      TRUE ~ "Linear"
+
+    )
+
+  )
+
+summary_agent_vmarcha
+
+```
+
+
+
+## 46_optimal dose agent_MULTICOMPONENT
+
+```{r}
+
+
+pf_vmarcha_multicomponent <- pf_vmarcha_overall %>%
+  filter(agent == "multicomponent")
+
+lm_multicomponent_vmarcha <- lm(
+  y ~ weekly_dose,
+  data = pf_vmarcha_multicomponent
+)
+
+summary(lm_multicomponent_vmarcha)
+
+confint(
+  lm_multicomponent_vmarcha,
+  level = 0.95
+)
+
+coef_multi <- summary(lm_multicomponent_vmarcha)$coefficients
+
+beta_multi <- coef_multi["weekly_dose","Estimate"]
+
+p_multi <- coef_multi["weekly_dose","Pr(>|t|)"]
+
+ci_multi <- confint(
+  lm_multicomponent_vmarcha,
+  "weekly_dose"
+)
+
+cat(
+  "Slope (β):", round(beta_multi,6), "\n",
+  "95% CI:",
+  round(ci_multi[1],6),
+  "to",
+  round(ci_multi[2],6), "\n",
+  "P-value:",
+  signif(p_multi,3), "\n"
+)
+
+
+```
+
+##46.1 graph dose_Agent_MULTICOMPONENT
+```{r}
+
+
+dose_grid_multi <- tibble(
+  weekly_dose = seq(
+    min(pf_vmarcha_multicomponent$weekly_dose, na.rm = TRUE),
+    max(pf_vmarcha_multicomponent$weekly_dose, na.rm = TRUE),
+    length.out = 200
+  )
+)
+
+pred_multi <- predict(
+  lm_multicomponent_vmarcha,
+  newdata = dose_grid_multi,
+  interval = "confidence",
+  level = 0.95
+)
+
+pred_df_multi <- dose_grid_multi %>%
+  mutate(
+    predicted = pred_multi[, "fit"],
+    lower = pred_multi[, "lwr"],
+    upper = pred_multi[, "upr"]
+  )
+
+p_vmarcha_multicomponent <- ggplot(
+  data = pf_vmarcha_multicomponent,
+  mapping = aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_point(
+    alpha = 0.6
+  ) +
+  geom_ribbon(
+    data = pred_df_multi,
+    mapping = aes(
+      x = weekly_dose,
+      ymin = lower,
+      ymax = upper
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.20
+  ) +
+  geom_line(
+    data = pred_df_multi,
+    mapping = aes(
+      x = weekly_dose,
+      y = predicted
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Change in gait speed (m/s)",
+    title = "Dose–response relationship for multicomponent exercise",
+    subtitle = "Linear model with 95% confidence interval"
+  ) +
+  theme_minimal()
+
+p_vmarcha_multicomponent
+```
+
+##46.3 dose response overall 2-degree-of-freedom spline_MULTICOMPONENT
+
+```{r}
+
+
+pf_vmarcha_multicomponent_spline2 <- pf_vmarcha_overall %>%
+  filter(
+    agent == "multicomponent",
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+
+
+n_arms_multi_spline2 <- nrow(
+  pf_vmarcha_multicomponent_spline2
+)
+
+n_studies_multi_spline2 <- n_distinct(
+  pf_vmarcha_multicomponent_spline2$studyID
+)
+
+n_unique_dose_multi_spline2 <- n_distinct(
+  pf_vmarcha_multicomponent_spline2$weekly_dose
+)
+
+
+spline2_multicomponent_vmarcha <- lm(
+  y ~ splines::ns(weekly_dose, df = 2),
+  data = pf_vmarcha_multicomponent_spline2
+)
+
+summary(
+  spline2_multicomponent_vmarcha
+)
+
+
+
+dose_grid_multi_spline2 <- tibble(
+  weekly_dose = seq(
+    min(
+      pf_vmarcha_multicomponent_spline2$weekly_dose,
+      na.rm = TRUE
+    ),
+    max(
+      pf_vmarcha_multicomponent_spline2$weekly_dose,
+      na.rm = TRUE
+    ),
+    length.out = 500
+  )
+)
+
+
+
+pred_multi_spline2 <- predict(
+  spline2_multicomponent_vmarcha,
+  newdata = dose_grid_multi_spline2,
+  interval = "confidence",
+  level = 0.95
+)
+
+pred_df_multi_spline2 <- dose_grid_multi_spline2 %>%
+  mutate(
+    predicted = pred_multi_spline2[, "fit"],
+    lower = pred_multi_spline2[, "lwr"],
+    upper = pred_multi_spline2[, "upr"]
+  )
+
+
+
+max_row_multi_spline2 <- pred_df_multi_spline2 %>%
+  slice_max(
+    order_by = predicted,
+    n = 1,
+    with_ties = FALSE
+  )
+
+minimum_observed_dose_multi <- min(
+  dose_grid_multi_spline2$weekly_dose
+)
+
+maximum_observed_dose_multi <- max(
+  dose_grid_multi_spline2$weekly_dose
+)
+
+maximum_location_multi_spline2 <- case_when(
+
+  max_row_multi_spline2$weekly_dose <=
+    minimum_observed_dose_multi ~
+    "Minimum observed dose boundary",
+
+  max_row_multi_spline2$weekly_dose >=
+    maximum_observed_dose_multi ~
+    "Maximum observed dose boundary",
+
+  TRUE ~
+    "Internal maximum"
+)
+
+
+
+summary_multi_spline2_vmarcha <- tibble(
+  agent = "multicomponent",
+  model = "Natural spline, 2 df",
+  n_arms = n_arms_multi_spline2,
+  n_studies = n_studies_multi_spline2,
+  n_unique_dose = n_unique_dose_multi_spline2,
+  residual_df = df.residual(
+    spline2_multicomponent_vmarcha
+  ),
+  min_observed_dose = round(
+    minimum_observed_dose_multi,
+    1
+  ),
+  max_observed_dose = round(
+    maximum_observed_dose_multi,
+    1
+  ),
+  maximum_predicted_dose = round(
+    max_row_multi_spline2$weekly_dose,
+    1
+  ),
+  maximum_predicted_change = round(
+    max_row_multi_spline2$predicted,
+    3
+  ),
+  maximum_location = maximum_location_multi_spline2,
+  interpretation = case_when(
+
+    maximum_location_multi_spline2 !=
+      "Internal maximum" ~
+      paste(
+        "Exploratory only; no internal maximum identified",
+        "and the maximum occurs at the boundary"
+      ),
+
+    TRUE ~
+      paste(
+        "Exploratory internal maximum;",
+        "the linear model remains the primary model"
+      )
+  )
+)
+
+summary_multi_spline2_vmarcha
+
+
+
+p_vmarcha_multicomponent_spline2 <- ggplot(
+  data = pf_vmarcha_multicomponent_spline2,
+  mapping = aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_point(
+    alpha = 0.65
+  ) +
+  geom_ribbon(
+    data = pred_df_multi_spline2,
+    mapping = aes(
+      x = weekly_dose,
+      ymin = lower,
+      ymax = upper
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.20
+  ) +
+  geom_line(
+    data = pred_df_multi_spline2,
+    mapping = aes(
+      x = weekly_dose,
+      y = predicted
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Change in gait speed (m/s)",
+    title = paste(
+      "Exploratory nonlinear dose-response",
+      "for multicomponent exercise"
+    ),
+    subtitle = paste(
+      "Natural spline with 2 degrees of freedom;",
+      "the linear model was retained as the primary model"
+    )
+  ) +
+  theme_minimal()
+
+p_vmarcha_multicomponent_spline2
+```
+
+
+
+### fucntional mobility # Lower is better = TRUE
+
+## 1_filter domain 
+
+```{r} 
+
+
+pf_tug <- data %>%
+  filter(
+    outcome == "physical function",
+    scale %in% c("TUG8", "TUG10")
+  ) %>%
+  mutate(
+    y = as.numeric(y),
+    se = as.numeric(se),
+    postn = as.numeric(postn),
+    premean = as.numeric(premean),
+    weekly_dose = as.numeric(weekly_dose)
+  )
+
+
+
+```
+
+
+## 2_Cheking networks and models
+
+```{r} 
+
+
+pf_tug %>%
+  count(
+    studyID,
+    scale,
+    agent,
+    trt,
+    sort = TRUE
+  )
+
+
+
+pf_tug %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+    n_scales = n_distinct(scale),
+    n_agents = n_distinct(agent),
+    n_treatments = n_distinct(trt),
+    missing_y = sum(is.na(y)),
+    missing_se = sum(is.na(se)),
+    missing_postn = sum(is.na(postn)),
+    missing_premean = sum(is.na(premean)),
+    missing_weekly_dose = sum(is.na(weekly_dose))
+  )
+
+
+
+unique(pf_tug$scale)
+
+
+
+unique(pf_tug$agent)
+
+
+
+unique(pf_tug$trt)
+
+
+pf_tug %>%
+  group_by(scale) %>%
+  summarise(
+    n_studies = n_distinct(studyID),
+    n_arms = n(),
+    .groups = "drop"
+  )
+
+
+
+pf_tug %>%
+  group_by(agent) %>%
+  summarise(
+    n_studies = n_distinct(studyID),
+    n_arms = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_studies))
+```
+
+### Meta-Analysis Model For Agent
+
+## 3_Creation red_Agent
+
+```{r}
+
+pf_tug <- pf_tug %>%
+  group_by(scale) %>%
+  mutate(
+    premean_c = premean - mean(premean, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+
+
+pf_tug %>%
+  group_by(scale) %>%
+  summarise(
+    n_arms = n(),
+    n_studies = n_distinct(studyID),
+    mean_premean = mean(premean, na.rm = TRUE),
+    mean_premean_c = mean(premean_c, na.rm = TRUE),
+    missing_premean_c = sum(is.na(premean_c)),
+    .groups = "drop"
+  )
+
+
+
+net_agent_tug <- set_agd_arm(
+  pf_tug,
+  study = studyID,
+  trt = agent,
+  y = y,
+  se = se,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+
+net_agent_tug
+summary(net_agent_tug)
+
+
+plot(
+  net_agent_tug,
+  weight_edges = TRUE,
+  weight_nodes = TRUE
+) +
+  theme(
+    legend.position = "bottom"
+  )
+
+```
+
+## 4_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+fit_FE_tug_agent <- nma(
+  net_agent_tug,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 5),
+  prior_trt = normal(scale = 5)
+)
+
+fit_FE_tug_agent
+
+```
+
+## 5_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_tug_agent <- nma(
+  net_agent_tug,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 5),
+  prior_trt = normal(scale = 5),
+  prior_het = half_normal(scale = 2)
+)
+
+fit_RE_tug_agent
+
+```
+
+## 6_Model 3:Fixed-effect meta-analysis with covariate `premean`
+
+```{r}
+fit_FE_reg_tug_agent <- nma(
+  net_agent_tug,
+  seed = 25062026,
+  trt_effects = "fixed",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 5),
+  prior_trt = normal(scale = 5),
+  prior_reg = normal(scale = 1),
+  adapt_delta = 0.99
+)
+
+fit_FE_reg_tug_agent
+
+```
+
+## 7_Model 4:Random-effects meta-analysis with covariate `premean`
+
+```{r}
+fit_RE_reg_tug_agent <- nma(
+  net_agent_tug,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 5),
+  prior_trt = normal(scale = 5),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 2),
+  adapt_delta = 0.99
+)
+
+fit_RE_reg_tug_agent
+
+```
+
+## 8_Model comparation
+
+```{r}
+
+dic_FE_tug_agent <- dic(fit_FE_tug_agent)
+dic_RE_tug_agent <- dic(fit_RE_tug_agent)
+dic_FE_reg_tug_agent <- dic(fit_FE_reg_tug_agent)
+dic_RE_reg_tug_agent <- dic(fit_RE_reg_tug_agent)
+
+dic_FE_tug_agent
+dic_RE_tug_agent
+dic_FE_reg_tug_agent
+dic_RE_reg_tug_agent
+
+model_comparison_tug_agent <- tibble(
+  model = c(
+    "Fixed-effect",
+    "Random-effects",
+    "Fixed-effect + premean_c",
+    "Random-effects + premean_c"
+  ),
+  DIC = c(
+    dic_FE_tug_agent$dic,
+    dic_RE_tug_agent$dic,
+    dic_FE_reg_tug_agent$dic,
+    dic_RE_reg_tug_agent$dic
+  ),
+  residual_deviance = c(
+    dic_FE_tug_agent$resdev,
+    dic_RE_tug_agent$resdev,
+    dic_FE_reg_tug_agent$resdev,
+    dic_RE_reg_tug_agent$resdev
+  )
+)
+
+model_comparison_tug_agent
+
+
+```
+
+## 9_check
+
+```{r}
+plot(dic_FE_tug_agent)
+plot(dic_RE_tug_agent)
+plot(dic_FE_reg_tug_agent)
+plot(dic_RE_reg_tug_agent)
+
+```
+
+
+## 10_model choose
+
+```{r}
+fit_main_tug_agent <- fit_RE_reg_tug_agent
+dic_main_tug_agent <- dic_RE_reg_tug_agent
+
+```
+
+
+## 11_relative effects
+
+```{r}
+
+
+pf_tug %>%
+  group_by(scale) %>%
+  summarise(
+    min_premean = min(premean, na.rm = TRUE),
+    mean_premean = mean(premean, na.rm = TRUE),
+    median_premean = median(premean, na.rm = TRUE),
+    max_premean = max(premean, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+rel_effect_tug_agent <- relative_effects(
+  fit_main_tug_agent,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline TUG",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rel_effect_tug_agent
+
+plot(
+  rel_effect_tug_agent,
+  ref_line = 0,
+  stat = "halfeye"
+)
+
+summary(fit_main_tug_agent)
+
+rel_effect_tug_agent
+
+```
+
+
+## 12_general Ranking
+
+```{r}
+rank_tug_agent <- posterior_ranks(
+  fit_main_tug_agent,
+  lower_better = TRUE,
+  newdata = tibble(
+    studyID = "Mean baseline TUG",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rank_tug_agent
+
+plot(rank_tug_agent)
+
+rank_tug_agent
+```
+
+
+
+## 15_rank probabilities
+
+```{r}
+rank_probs_cum_tug_agent <- posterior_rank_probs(
+  fit_main_tug_agent,
+  lower_better = TRUE,
+  newdata = tibble(
+    studyID = "Mean baseline TUG",
+    premean_c = 0
+  ),
+  study = studyID,
+  cumulative = TRUE
+)
+
+rank_probs_cum_tug_agent
+
+plot(rank_probs_cum_tug_agent)
+
+```
+
+
+
+
+## 17_Checking for inconsistency
+
+```{r}
+
+
+
+fit_UME_RE_reg_tug_agent <- nma(
+  net_agent_tug,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  consistency = "ume",
+  prior_intercept = normal(scale = 5),
+  prior_trt = normal(scale = 5),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 2),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_reg_tug_agent
+summary(fit_UME_RE_reg_tug_agent)
+
+
+dic_UME_RE_reg_tug_agent <- dic(
+  fit_UME_RE_reg_tug_agent
+)
+
+dic_main_tug_agent
+dic_UME_RE_reg_tug_agent
+
+
+inconsistency_comparison_tug_agent <- tibble(
+  model = c(
+    "Consistency: random-effects + premean_c",
+    "UME: random-effects + premean_c"
+  ),
+  DIC = c(
+    dic_main_tug_agent$dic,
+    dic_UME_RE_reg_tug_agent$dic
+  ),
+  residual_deviance = c(
+    dic_main_tug_agent$resdev,
+    dic_UME_RE_reg_tug_agent$resdev
+  )
+)
+
+inconsistency_comparison_tug_agent
+
+
+plot(
+  dic_main_tug_agent,
+  dic_UME_RE_reg_tug_agent,
+  show_uncertainty = FALSE
+)
+
+
+
+plot(
+  dic_main_tug_agent,
+  dic_UME_RE_reg_tug_agent,
+  show_uncertainty = FALSE
+)
+```
+
+
+## 20_posterior predictive distribution
+
+```{r}
+
+
+rel_effect_pred_tug_agent <- relative_effects(
+  fit_main_tug_agent,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline TUG",
+    premean_c = 0
+  ),
+  study = studyID,
+  predictive_distribution = TRUE
+)
+
+rel_effect_pred_tug_agent
+
+
+prob_harm_tug_agent <- colMeans(
+  as.matrix(rel_effect_pred_tug_agent) > 0
+)
+
+prob_harm_tug_agent
+
+```
+
+
+### Meta-Analysis Model For Trt
+
+## 21_Creation red_Trt
+
+```{r}
+pf_tug_trt <- pf_tug %>%
+  mutate(
+    trt = case_when(
+      trt == "Tai Chi" ~ "mind body",
+      trt == "wii" ~ "exergame",
+      trt == "virtual reality" ~ "exergame",
+      trt == "areobic+resistance" ~ "aerobic+resistance",
+      trt == "theraband" ~ "resistance training",
+      trt == "aerobic+resistance+stretching" ~ "aerobic+resistance",
+      trt == "resistance+balance+stretching" ~ "resistance+balance",
+      TRUE ~ trt
+    )
+  )
+
+
+pf_tug_trt %>%
+  count(trt, sort = TRUE)
+
+pf_tug_trt %>%
+  group_by(trt) %>%
+  summarise(
+    n_arms = n(),
+    n_studies = n_distinct(studyID),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_studies), desc(n_arms))
+
+
+net_trt_tug <- set_agd_arm(
+  pf_tug_trt,
+  study = studyID,
+  trt = trt,
+  y = y,
+  se = se,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+net_trt_tug
+summary(net_trt_tug)
+
+plot(
+  net_trt_tug,
+  weight_edges = TRUE,
+  weight_nodes = TRUE
+) +
+  theme(
+    legend.position = "bottom"
+  )
+
+pf_tug_trt %>%
+  count(trt, sort = TRUE)
+```
+
+## 22_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+fit_FE_tug <- nma(
+  net_trt_tug,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 5),
+  prior_trt = normal(scale = 5)
+)
+
+fit_FE_tug
+
+```
+
+## 23_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_tug <- nma(
+  net_trt_tug,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 5),
+  prior_trt = normal(scale = 5),
+  prior_het = half_normal(scale = 2)
+)
+
+fit_RE_tug
+
+```
+
+## 24_Model 3:Fixed-effect meta-analysis with covariate `premean`
+
+```{r}
+fit_FE_reg_tug <- nma(
+  net_trt_tug,
+  seed = 25062026,
+  trt_effects = "fixed",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 5),
+  prior_trt = normal(scale = 5),
+  prior_reg = normal(scale = 1),
+  adapt_delta = 0.99
+)
+
+fit_FE_reg_tug
+
+```
+
+## 25_Model 4:Random-effects meta-analysis with covariate `premean`
+
+```{r}
+fit_RE_reg_tug <- nma(
+  net_trt_tug,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 5),
+  prior_trt = normal(scale = 5),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 2),
+  adapt_delta = 0.99
+)
+
+fit_RE_reg_tug
+
+```
+
+## 26_Model comparation
+
+```{r}
+
+
+dic_FE_tug <- dic(fit_FE_tug)
+dic_RE_tug <- dic(fit_RE_tug)
+dic_FE_reg_tug <- dic(fit_FE_reg_tug)
+dic_RE_reg_tug <- dic(fit_RE_reg_tug)
+
+dic_FE_tug
+dic_RE_tug
+dic_FE_reg_tug
+dic_RE_reg_tug
+
+
+model_comparison_tug <- tibble(
+  model = c(
+    "Fixed-effect",
+    "Random-effects",
+    "Fixed-effect + premean_c",
+    "Random-effects + premean_c"
+  ),
+  DIC = c(
+    dic_FE_tug$dic,
+    dic_RE_tug$dic,
+    dic_FE_reg_tug$dic,
+    dic_RE_reg_tug$dic
+  ),
+  residual_deviance = c(
+    dic_FE_tug$resdev,
+    dic_RE_tug$resdev,
+    dic_FE_reg_tug$resdev,
+    dic_RE_reg_tug$resdev
+  )
+)
+
+model_comparison_tug
+
+
+```
+
+## 27_check
+
+```{r}
+plot(dic_FE_tug)
+plot(dic_RE_tug)
+plot(dic_FE_reg_tug)
+plot(dic_RE_reg_tug)
+
+```
+
+
+## 28_model choose
+
+```{r}
+fit_main_tug_trt <- fit_RE_reg_tug
+dic_main_tug_trt <- dic_RE_reg_tug
+
+```
+
+
+## 29_relative effects
+
+```{r}
+pf_tug_trt %>%
+  group_by(scale) %>%
+  summarise(
+    min_premean = min(premean, na.rm = TRUE),
+    mean_premean = mean(premean, na.rm = TRUE),
+    median_premean = median(premean, na.rm = TRUE),
+    max_premean = max(premean, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+rel_effect_tug_trt <- relative_effects(
+  fit_main_tug_trt,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline TUG",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rel_effect_tug_trt
+
+plot(
+  rel_effect_tug_trt,
+  ref_line = 0,
+  stat = "halfeye"
+)
+
+summary(fit_main_tug_trt)
+
+rel_effect_tug_trt
+
+
+```
+
+
+## 30_general Ranking
+
+```{r}
+rank_tug_trt <- posterior_ranks(
+  fit_main_tug_trt,
+  lower_better = TRUE,
+  newdata = tibble(
+    studyID = "Mean baseline TUG",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rank_tug_trt
+
+plot(rank_tug_trt)
+
+rank_tug_trt
+
+```
+
+## 33_rank probabilities
+
+```{r}
+
+rank_probs_cum_tug_trt <- posterior_rank_probs(
+  fit_main_tug_trt,
+  lower_better = TRUE,
+  newdata = tibble(
+    studyID = "Mean baseline TUG",
+    premean_c = 0
+  ),
+  study = studyID,
+  cumulative = TRUE
+)
+
+rank_probs_cum_tug_trt
+
+plot(rank_probs_cum_tug_trt)
+
+```
+
+
+## 35_Checking for inconsistency
+
+```{r}
+
+
+fit_UME_RE_reg_tug_trt <- nma(
+  net_trt_tug,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  consistency = "ume",
+  prior_intercept = normal(scale = 5),
+  prior_trt = normal(scale = 5),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 2),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_reg_tug_trt
+summary(fit_UME_RE_reg_tug_trt)
+
+
+dic_UME_RE_reg_tug_trt <- dic(
+  fit_UME_RE_reg_tug_trt
+)
+
+dic_main_tug_trt
+dic_UME_RE_reg_tug_trt
+
+
+inconsistency_comparison_tug_trt <- tibble(
+  model = c(
+    "Consistency: random-effects + premean_c",
+    "UME: random-effects + premean_c"
+  ),
+  DIC = c(
+    dic_main_tug_trt$dic,
+    dic_UME_RE_reg_tug_trt$dic
+  ),
+  residual_deviance = c(
+    dic_main_tug_trt$resdev,
+    dic_UME_RE_reg_tug_trt$resdev
+  )
+)
+
+inconsistency_comparison_tug_trt
+
+
+plot(
+  dic_main_tug_trt,
+  dic_UME_RE_reg_tug_trt,
+  show_uncertainty = FALSE
+)
+```
+
+
+## 38_posterior predictive distribution
+
+```{r}
+
+rel_effect_pred_tug_trt <- relative_effects(
+  fit_main_tug_trt,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline TUG",
+    premean_c = 0
+  ),
+  study = studyID,
+  predictive_distribution = TRUE
+)
+
+rel_effect_pred_tug_trt
+
+
+prob_harm_tug_trt <- colMeans(
+  as.matrix(rel_effect_pred_tug_trt) > 0
+)
+
+prob_harm_tug_trt
+
+
+```
+
+### dose response overall 
+
+## 39_checking data y ESTADISTICA
+
+```{r}
+## 41_statistical comprobation overall
+
+## 39_checking data overall
+
+
+pf_tug_overall <- data %>%
+  filter(
+    outcome == "physical function",
+    scale %in% c("TUG8", "TUG10")
+  ) %>%
+  mutate(
+    y = as.numeric(y),
+    se = as.numeric(se),
+    postn = as.numeric(postn),
+    premean = as.numeric(premean),
+    weekly_dose = as.numeric(weekly_dose),
+
+    overall = if_else(
+      agent == "usual care",
+      "usual care",
+      "exercise"
+    )
+  )
+
+
+pf_tug_overall_dose <- pf_tug_overall %>%
+  filter(
+    overall == "exercise",
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+
+tug_dose_data_summary <- pf_tug_overall %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+    n_scales = n_distinct(scale),
+
+    missing_weekly_dose = sum(
+      is.na(weekly_dose)
+    ),
+
+    missing_y = sum(
+      is.na(y)
+    ),
+
+    missing_se = sum(
+      is.na(se)
+    ),
+
+    missing_postn = sum(
+      is.na(postn)
+    ),
+
+    min_dose = min(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+
+    p25_dose = quantile(
+      weekly_dose,
+      0.25,
+      na.rm = TRUE
+    ),
+
+    median_dose = median(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+
+    mean_dose = mean(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+
+    p75_dose = quantile(
+      weekly_dose,
+      0.75,
+      na.rm = TRUE
+    ),
+
+    max_dose = max(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+
+    n_unique_dose = n_distinct(
+      weekly_dose,
+      na.rm = TRUE
+    )
+  )
+
+tug_dose_data_summary
+
+
+tug_usual_care_summary <- pf_tug_overall %>%
+  filter(
+    overall == "usual care"
+  ) %>%
+  summarise(
+    n_usual_care_arms = n(),
+
+    n_dose_zero = sum(
+      weekly_dose == 0,
+      na.rm = TRUE
+    ),
+
+    n_dose_missing = sum(
+      is.na(weekly_dose)
+    )
+  )
+
+tug_usual_care_summary
+
+
+tug_exercise_dose_summary <- pf_tug_overall_dose %>%
+  summarise(
+    n_exercise_arms = n(),
+
+    n_exercise_studies = n_distinct(
+      studyID
+    ),
+
+    min_exercise_dose = min(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+
+    p25_exercise_dose = quantile(
+      weekly_dose,
+      0.25,
+      na.rm = TRUE
+    ),
+
+    median_exercise_dose = median(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+
+    mean_exercise_dose = mean(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+
+    p75_exercise_dose = quantile(
+      weekly_dose,
+      0.75,
+      na.rm = TRUE
+    ),
+
+    max_exercise_dose = max(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+
+    n_unique_exercise_dose = n_distinct(
+      weekly_dose,
+      na.rm = TRUE
+    )
+  )
+
+tug_exercise_dose_summary
+
+
+pf_tug_overall %>%
+  count(
+    agent,
+    is.na(weekly_dose),
+    sort = TRUE
+  )
+
+
+pf_tug_overall %>%
+  count(
+    trt,
+    is.na(weekly_dose),
+    sort = TRUE
+  )
+
+
+pf_tug_overall %>%
+  count(
+    overall,
+    sort = TRUE
+  )
+
+
+## 41_statistical comprobation overall
+
+pf_tug_overall_dose <- pf_tug_overall %>%
+  filter(
+    overall == "exercise",
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+
+if (nrow(pf_tug_overall_dose) < 5) {
+  stop("No hay suficientes observaciones para comparar los modelos.")
+}
+
+
+lm_simple_tug_overall <- lm(
+  y ~ weekly_dose,
+  data = pf_tug_overall_dose
+)
+
+lm_spline2_tug_overall <- lm(
+  y ~ splines::ns(weekly_dose, df = 2),
+  data = pf_tug_overall_dose
+)
+
+lm_spline3_tug_overall <- lm(
+  y ~ splines::ns(weekly_dose, df = 3),
+  data = pf_tug_overall_dose
+)
+
+
+anova_linear_vs_spline2_tug <- anova(
+  lm_simple_tug_overall,
+  lm_spline2_tug_overall
+)
+
+anova_linear_vs_spline3_tug <- anova(
+  lm_simple_tug_overall,
+  lm_spline3_tug_overall
+)
+
+anova_spline2_vs_spline3_tug <- anova(
+  lm_spline2_tug_overall,
+  lm_spline3_tug_overall
+)
+
+
+p_linear_tug <- coef(
+  summary(lm_simple_tug_overall)
+)["weekly_dose", "Pr(>|t|)"]
+
+p_linear_vs_spline2_tug <-
+  anova_linear_vs_spline2_tug$`Pr(>F)`[2]
+
+p_linear_vs_spline3_tug <-
+  anova_linear_vs_spline3_tug$`Pr(>F)`[2]
+
+p_spline2_vs_spline3_tug <-
+  anova_spline2_vs_spline3_tug$`Pr(>F)`[2]
+
+
+aic_tug <- AIC(
+  lm_simple_tug_overall,
+  lm_spline2_tug_overall,
+  lm_spline3_tug_overall
+)
+
+
+comparison_tug_overall <- tibble(
+  outcome = "Functional mobility (TUG)",
+  n = nrow(pf_tug_overall_dose),
+  n_studies = n_distinct(
+    pf_tug_overall_dose$studyID
+  ),
+  n_unique_dose = n_distinct(
+    pf_tug_overall_dose$weekly_dose
+  ),
+  p_linear = p_linear_tug,
+  p_linear_vs_ns2 = p_linear_vs_spline2_tug,
+  p_linear_vs_ns3 = p_linear_vs_spline3_tug,
+  p_ns2_vs_ns3 = p_spline2_vs_spline3_tug,
+  AIC_linear = AIC(lm_simple_tug_overall),
+  AIC_ns2 = AIC(lm_spline2_tug_overall),
+  AIC_ns3 = AIC(lm_spline3_tug_overall),
+  adjusted_R2_linear =
+    summary(lm_simple_tug_overall)$adj.r.squared,
+  adjusted_R2_ns2 =
+    summary(lm_spline2_tug_overall)$adj.r.squared,
+  adjusted_R2_ns3 =
+    summary(lm_spline3_tug_overall)$adj.r.squared
+) %>%
+  mutate(
+    selected_model = case_when(
+
+      p_linear_vs_ns2 < 0.05 &
+        (
+          is.na(p_ns2_vs_ns3) |
+            p_ns2_vs_ns3 >= 0.05
+        ) ~
+        "Spline 2",
+
+      p_linear_vs_ns3 < 0.05 &
+        p_ns2_vs_ns3 < 0.05 ~
+        "Spline 3",
+
+      TRUE ~
+        "Linear"
+    )
+  )
+
+comparison_tug_overall
+
+model_fit_tug_overall <- tibble(
+  model = c(
+    "Linear",
+    "Natural spline, 2 df",
+    "Natural spline, 3 df"
+  ),
+  df_residual = c(
+    df.residual(lm_simple_tug_overall),
+    df.residual(lm_spline2_tug_overall),
+    df.residual(lm_spline3_tug_overall)
+  ),
+  AIC = c(
+    AIC(lm_simple_tug_overall),
+    AIC(lm_spline2_tug_overall),
+    AIC(lm_spline3_tug_overall)
+  ),
+  R2 = c(
+    summary(lm_simple_tug_overall)$r.squared,
+    summary(lm_spline2_tug_overall)$r.squared,
+    summary(lm_spline3_tug_overall)$r.squared
+  ),
+  adjusted_R2 = c(
+    summary(lm_simple_tug_overall)$adj.r.squared,
+    summary(lm_spline2_tug_overall)$adj.r.squared,
+    summary(lm_spline3_tug_overall)$adj.r.squared
+  )
+)
+
+model_fit_tug_overall
+
+summary(lm_simple_tug_overall)
+summary(lm_spline2_tug_overall)
+summary(lm_spline3_tug_overall)
+
+anova_linear_vs_spline2_tug
+anova_linear_vs_spline3_tug
+anova_spline2_vs_spline3_tug
+
+```
+
+## 40_exploratory graph overall
+
+```{r}
+## 40_exploratory graph overall
+
+pf_tug_overall_dose <- pf_tug_overall %>%
+  filter(
+    overall == "exercise",
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+
+lin_plot_tug_overall <- ggplot(
+  pf_tug_overall_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_point(
+    alpha = 0.65
+  ) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = TRUE
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Change in TUG time (s)",
+    title = "Linear regression"
+  ) +
+  theme_minimal()
+
+
+loess_plot_tug_overall <- ggplot(
+  pf_tug_overall_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_point(
+    alpha = 0.65
+  ) +
+  geom_smooth(
+    method = "loess",
+    formula = y ~ x,
+    se = TRUE
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Change in TUG time (s)",
+    title = "LOESS"
+  ) +
+  theme_minimal()
+
+
+spline2_plot_tug_overall <- ggplot(
+  pf_tug_overall_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_point(
+    alpha = 0.65
+  ) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ splines::ns(x, df = 2),
+    se = TRUE
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Change in TUG time (s)",
+    title = "Natural spline, 2 df"
+  ) +
+  theme_minimal()
+
+
+spline3_plot_tug_overall <- ggplot(
+  pf_tug_overall_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_point(
+    alpha = 0.65
+  ) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ splines::ns(x, df = 3),
+    se = TRUE
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Change in TUG time (s)",
+    title = "Natural spline, 3 df"
+  ) +
+  theme_minimal()
+
+gridExtra::grid.arrange(
+  lin_plot_tug_overall,
+  loess_plot_tug_overall,
+  spline2_plot_tug_overall,
+  spline3_plot_tug_overall,
+  nrow = 2
+)
+```
+
+
+
+### strengh # Lower is better = FALSE
+
+## 1_filter domain 
+
+```{r} 
+
+## 1_filter domain chair-stand 
+
+pf_chair_stand <- data %>%
+  filter(
+    outcome == "physical function",
+    scale %in% c(
+      "30CSTS_times",
+      "FTSTS"
+    )
+  ) %>%
+  mutate(
+    pren = as.numeric(pren),
+    premean = as.numeric(premean),
+    postn = as.numeric(postn),
+    postmean = as.numeric(postmean),
+    y_raw = as.numeric(y),
+    se_diff = as.numeric(se_diff),
+    weekly_dose = as.numeric(weekly_dose),
+
+    sd_change = se_diff * sqrt(postn),
+
+    y_harm = case_when(
+      scale == "FTSTS" ~ -y_raw,
+      scale == "30CSTS_times" ~ y_raw,
+      TRUE ~ NA_real_
+    ),
+
+    smc_unadjusted = y_harm / sd_change,
+
+    J = 1 - 3 / (4 * postn - 9),
+
+    smc_hedges = J * smc_unadjusted
+  )
+
+pf_chair_stand %>%
+  group_by(scale) %>%
+  summarise(
+    n_arms = n(),
+    n_studies = n_distinct(studyID),
+
+    missing_y_raw = sum(is.na(y_raw)),
+    missing_y_harm = sum(is.na(y_harm)),
+    missing_se_diff = sum(is.na(se_diff)),
+    missing_sd_change = sum(is.na(sd_change)),
+    missing_smc = sum(is.na(smc_hedges)),
+
+    mean_raw_change = mean(y_raw, na.rm = TRUE),
+    mean_harmonised_change = mean(y_harm, na.rm = TRUE),
+
+    min_harmonised_change = min(y_harm, na.rm = TRUE),
+    max_harmonised_change = max(y_harm, na.rm = TRUE),
+
+    min_sd_change = min(sd_change, na.rm = TRUE),
+    max_sd_change = max(sd_change, na.rm = TRUE),
+
+    mean_smc = mean(smc_hedges, na.rm = TRUE),
+    min_smc = min(smc_hedges, na.rm = TRUE),
+    max_smc = max(smc_hedges, na.rm = TRUE),
+
+    .groups = "drop"
+  )
+
+```
+
+
+## 2_Cheking networks and models
+
+```{r} 
+## 2_Cheking networks and models
+
+
+pf_chair_stand %>%
+  count(
+    studyID,
+    scale,
+    agent,
+    trt,
+    sort = TRUE
+  )
+
+
+pf_chair_stand %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+    n_scales = n_distinct(scale),
+    n_agents = n_distinct(agent),
+    n_treatments = n_distinct(trt),
+
+    missing_y_harm = sum(is.na(y_harm)),
+    missing_se_diff = sum(is.na(se_diff)),
+    missing_sd_change = sum(is.na(sd_change)),
+    missing_postn = sum(is.na(postn)),
+    missing_premean = sum(is.na(premean)),
+    missing_weekly_dose = sum(is.na(weekly_dose))
+  )
+
+
+unique(pf_chair_stand$scale)
+unique(pf_chair_stand$agent)
+unique(pf_chair_stand$trt)
+
+
+pf_chair_stand %>%
+  group_by(scale) %>%
+  summarise(
+    n_studies = n_distinct(studyID),
+    n_arms = n(),
+    .groups = "drop"
+  )
+
+
+pf_chair_stand %>%
+  group_by(agent) %>%
+  summarise(
+    n_studies = n_distinct(studyID),
+    n_arms = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_studies), desc(n_arms))
+
+
+pf_chair_stand %>%
+  count(studyID, name = "n_arms") %>%
+  arrange(n_arms)
+
+
+chair_stand_multiple_scales <- pf_chair_stand %>%
+  group_by(studyID) %>%
+  summarise(
+    n_scales = n_distinct(scale),
+    scales = paste(sort(unique(scale)), collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  filter(n_scales > 1)
+
+chair_stand_multiple_scales
+
+
+chair_stand_duplicated_agents <- pf_chair_stand %>%
+  count(studyID, agent, name = "n_rows") %>%
+  filter(n_rows > 1)
+
+chair_stand_duplicated_agents
+```
+
+### Meta-Analysis Model For Agent
+
+## 3_Creation red_Agent
+
+```{r}
+## 3_Creation de contrastes estandarizados y red_Agent
+
+
+pf_chair_stand_std <- pf_chair_stand %>%
+  group_by(studyID) %>%
+  mutate(
+    df_pool_change = sum(
+      postn - 1,
+      na.rm = TRUE
+    ),
+
+    pooled_sd_change = sqrt(
+      sum(
+        (postn - 1) * sd_change^2,
+        na.rm = TRUE
+      ) /
+        df_pool_change
+    ),
+
+    J_study = exp(
+      lgamma(df_pool_change / 2) -
+        0.5 * log(df_pool_change / 2) -
+        lgamma((df_pool_change - 1) / 2)
+    ),
+
+    standardised_arm_change =
+      J_study * y_harm / pooled_sd_change,
+
+    standardised_arm_se =
+      J_study * se_diff / pooled_sd_change
+  ) %>%
+  ungroup()
+
+pf_chair_stand_std %>%
+  summarise(
+    missing_pooled_sd = sum(is.na(pooled_sd_change)),
+    nonpositive_pooled_sd = sum(
+      pooled_sd_change <= 0,
+      na.rm = TRUE
+    ),
+    missing_standardised_change = sum(
+      is.na(standardised_arm_change)
+    ),
+    missing_standardised_se = sum(
+      is.na(standardised_arm_se)
+    ),
+    min_standardised_change = min(
+      standardised_arm_change,
+      na.rm = TRUE
+    ),
+    max_standardised_change = max(
+      standardised_arm_change,
+      na.rm = TRUE
+    )
+  )
+
+pf_chair_stand_std %>%
+  select(
+    studyID,
+    scale,
+    agent,
+    trt,
+    postn,
+    y_harm,
+    sd_change,
+    pooled_sd_change,
+    J_study,
+    standardised_arm_change,
+    standardised_arm_se
+  ) %>%
+  arrange(studyID, agent)
+
+chair_stand_contrast_agent <- pf_chair_stand_std %>%
+  group_by(studyID) %>%
+  group_modify(
+    ~ {
+
+      datos_estudio <- .x
+
+      ref_index <- if (
+        any(datos_estudio$agent == "usual care")
+      ) {
+        which(datos_estudio$agent == "usual care")[1]
+      } else {
+        1
+      }
+
+      ref_change <- datos_estudio$standardised_arm_change[
+        ref_index
+      ]
+
+      ref_se <- datos_estudio$standardised_arm_se[
+        ref_index
+      ]
+
+      ref_agent <- as.character(
+        datos_estudio$agent[ref_index]
+      )
+
+      datos_estudio %>%
+        mutate(
+          reference_agent = ref_agent,
+
+          is_reference_arm =
+            row_number() == ref_index,
+
+          y_smd = if_else(
+            is_reference_arm,
+            NA_real_,
+            standardised_arm_change - ref_change
+          ),
+
+          se_smd = if_else(
+            is_reference_arm,
+            ref_se,
+            sqrt(
+              standardised_arm_se^2 +
+                ref_se^2
+            )
+          )
+        )
+    }
+  ) %>%
+  ungroup()
+
+chair_stand_contrast_agent %>%
+  select(
+    studyID,
+    scale,
+    reference_agent,
+    agent,
+    is_reference_arm,
+    postn,
+    y_smd,
+    se_smd
+  ) %>%
+  arrange(studyID, desc(is_reference_arm), agent)
+
+chair_stand_contrast_agent %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+    n_reference_rows = sum(is_reference_arm),
+    missing_y_reference = sum(
+      is_reference_arm & is.na(y_smd)
+    ),
+    nonmissing_y_reference = sum(
+      is_reference_arm & !is.na(y_smd)
+    ),
+    missing_y_nonreference = sum(
+      !is_reference_arm & is.na(y_smd)
+    ),
+    missing_se = sum(is.na(se_smd)),
+    min_y_smd = min(y_smd, na.rm = TRUE),
+    max_y_smd = max(y_smd, na.rm = TRUE)
+  )
+
+net_agent_chair_stand <- set_agd_contrast(
+  chair_stand_contrast_agent,
+  study = studyID,
+  trt = agent,
+  y = y_smd,
+  se = se_smd,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+net_agent_chair_stand
+summary(net_agent_chair_stand)
+
+plot(
+  net_agent_chair_stand,
+  weight_edges = TRUE,
+  weight_nodes = TRUE
+) +
+  theme(
+    legend.position = "bottom"
+  )
+
+
+
+```
+
+## 4_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+fit_FE_chair_agent <- nma(
+  net_agent_chair_stand,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1)
+)
+
+fit_FE_chair_agent
+
+```
+
+## 5_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_chair_agent <- nma(
+  net_agent_chair_stand,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5)
+)
+
+fit_RE_chair_agent
+
+```
+
+## 6_Model comparation
+
+```{r}
+
+
+
+dic_FE_chair_agent <- dic(
+  fit_FE_chair_agent
+)
+
+dic_RE_chair_agent <- dic(
+  fit_RE_chair_agent
+)
+
+dic_FE_chair_agent
+dic_RE_chair_agent
+
+
+model_comparison_chair_agent <- tibble(
+  model = c(
+    "Fixed-effect",
+    "Random-effects"
+  ),
+  DIC = c(
+    dic_FE_chair_agent$dic,
+    dic_RE_chair_agent$dic
+  ),
+  residual_deviance = c(
+    dic_FE_chair_agent$resdev,
+    dic_RE_chair_agent$resdev
+  )
+)
+
+model_comparison_chair_agent
+
+```
+
+## 10_model choose
+
+```{r}
+fit_main_chair_agent <- fit_RE_chair_agent
+dic_main_chair_agent <- dic_RE_chair_agent
+
+```
+
+
+## 11_relative effects
+
+```{r}
+## 8_relative effects
+
+rel_effect_chair_agent <- relative_effects(
+  fit_main_chair_agent,
+  trt_ref = "usual care"
+)
+
+rel_effect_chair_agent
+
+plot(
+  rel_effect_chair_agent,
+  ref_line = 0,
+  stat = "halfeye"
+)
+
+summary(fit_main_chair_agent)
+
+rel_effect_chair_agent
+
+
+```
+
+
+## 12_general Ranking
+
+```{r}
+rank_chair_agent <- posterior_ranks(
+  fit_main_chair_agent,
+  lower_better = FALSE
+)
+
+rank_chair_agent
+
+plot(rank_chair_agent)
+
+```
+
+
+## 15_rank probabilities
+
+```{r}
+rank_probs_cum_chair_agent <- posterior_rank_probs(
+  fit_main_chair_agent,
+  lower_better = FALSE,
+  cumulative = TRUE
+)
+
+rank_probs_cum_chair_agent
+
+plot(rank_probs_cum_chair_agent)
+
+```
+
+
+## 17_Checking for inconsistency
+
+```{r}
+## 12_Checking for inconsistency
+
+
+fit_UME_RE_chair_agent <- nma(
+  net_agent_chair_stand,
+  seed = 25062026,
+  trt_effects = "random",
+  consistency = "ume",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_chair_agent
+summary(fit_UME_RE_chair_agent)
+
+
+dic_UME_RE_chair_agent <- dic(
+  fit_UME_RE_chair_agent
+)
+
+dic_main_chair_agent
+dic_UME_RE_chair_agent
+
+
+inconsistency_comparison_chair_agent <- tibble(
+  model = c(
+    "Consistency: random-effects",
+    "UME: random-effects"
+  ),
+  DIC = c(
+    dic_main_chair_agent$dic,
+    dic_UME_RE_chair_agent$dic
+  ),
+  residual_deviance = c(
+    dic_main_chair_agent$resdev,
+    dic_UME_RE_chair_agent$resdev
+  )
+)
+
+inconsistency_comparison_chair_agent
+
+
+plot(
+  dic_main_chair_agent,
+  dic_UME_RE_chair_agent,
+  show_uncertainty = FALSE
+)
+```
+
+## 20_posterior predictive distribution
+
+```{r}
+## 13_posterior predictive distribution
+
+
+rel_effect_pred_chair_agent <- relative_effects(
+  fit_main_chair_agent,
+  trt_ref = "usual care",
+  predictive_distribution = TRUE
+)
+
+rel_effect_pred_chair_agent
+
+
+
+prob_harm_chair_agent <- colMeans(
+  as.matrix(rel_effect_pred_chair_agent) < 0
+)
+
+prob_harm_chair_agent
+
+```
+
+
+### Meta-Analysis Model For Trt
+
+## 21_Creation red_Trt
+
+```{r}
+
+## 21_Creation red_Trt
+
+
+pf_chair_stand_trt <- pf_chair_stand_std %>%
+  mutate(
+    trt = case_when(
+      trt == "Tai Chi" ~ "mind body",
+      trt == "Acupunch" ~ "mind body",
+      trt == "theraband" ~ "resistance training",
+      trt == "functional" ~ "resistance training",
+      trt == "aerobic+resistance+stretching" ~ "resistance+balance+aerobic",
+      TRUE ~ trt
+    )
+  )
+
+pf_chair_stand_trt %>%
+  group_by(trt) %>%
+  summarise(
+    n_arms = n(),
+    n_studies = n_distinct(studyID),
+    .groups = "drop"
+  ) %>%
+  arrange(
+    desc(n_studies),
+    desc(n_arms)
+  )
+
+
+duplicated_trt_chair_stand <- pf_chair_stand_trt %>%
+  count(
+    studyID,
+    trt,
+    name = "n_rows"
+  ) %>%
+  filter(n_rows > 1)
+
+duplicated_trt_chair_stand
+
+
+chair_stand_contrast_trt <- pf_chair_stand_trt %>%
+  group_by(studyID) %>%
+  group_modify(
+    ~ {
+
+      datos_estudio <- .x
+
+
+      ref_index <- if (
+        any(datos_estudio$trt == "usual care")
+      ) {
+        which(
+          datos_estudio$trt == "usual care"
+        )[1]
+      } else {
+        1
+      }
+
+      ref_change <- datos_estudio$standardised_arm_change[
+        ref_index
+      ]
+
+      ref_se <- datos_estudio$standardised_arm_se[
+        ref_index
+      ]
+
+      ref_trt <- as.character(
+        datos_estudio$trt[ref_index]
+      )
+
+      datos_estudio %>%
+        mutate(
+          reference_trt = ref_trt,
+
+          is_reference_arm =
+            row_number() == ref_index,
+
+
+          y_smd = if_else(
+            is_reference_arm,
+            NA_real_,
+            standardised_arm_change - ref_change
+          ),
+
+
+          se_smd = if_else(
+            is_reference_arm,
+            ref_se,
+            sqrt(
+              standardised_arm_se^2 +
+                ref_se^2
+            )
+          )
+        )
+    }
+  ) %>%
+  ungroup()
+
+chair_stand_contrast_trt %>%
+  select(
+    studyID,
+    scale,
+    reference_trt,
+    trt,
+    is_reference_arm,
+    postn,
+    y_smd,
+    se_smd
+  ) %>%
+  arrange(
+    studyID,
+    desc(is_reference_arm),
+    trt
+  )
+
+chair_stand_contrast_trt %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+
+    n_reference_rows = sum(
+      is_reference_arm
+    ),
+
+    missing_y_reference = sum(
+      is_reference_arm &
+        is.na(y_smd)
+    ),
+
+    nonmissing_y_reference = sum(
+      is_reference_arm &
+        !is.na(y_smd)
+    ),
+
+    missing_y_nonreference = sum(
+      !is_reference_arm &
+        is.na(y_smd)
+    ),
+
+    missing_se = sum(
+      is.na(se_smd)
+    ),
+
+    min_y_smd = min(
+      y_smd,
+      na.rm = TRUE
+    ),
+
+    max_y_smd = max(
+      y_smd,
+      na.rm = TRUE
+    )
+  )
+
+net_trt_chair_stand <- set_agd_contrast(
+  chair_stand_contrast_trt,
+  study = studyID,
+  trt = trt,
+  y = y_smd,
+  se = se_smd,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+net_trt_chair_stand
+summary(net_trt_chair_stand)
+
+plot(
+  net_trt_chair_stand,
+  weight_edges = TRUE,
+  weight_nodes = TRUE
+) +
+  theme(
+    legend.position = "bottom"
+  )
+
+```
+
+## 22_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+## 22_Model 1: Fixed-effect meta-analysis
+
+fit_FE_chair_trt <- nma(
+  net_trt_chair_stand,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1)
+)
+
+fit_FE_chair_trt
+
+```
+
+## 23_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_chair_trt <- nma(
+  net_trt_chair_stand,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5)
+)
+
+fit_RE_chair_trt
+
+```
+
+
+## 26_Model comparation
+
+```{r}
+
+
+dic_FE_chair_trt <- dic(
+  fit_FE_chair_trt
+)
+
+dic_RE_chair_trt <- dic(
+  fit_RE_chair_trt
+)
+
+dic_FE_chair_trt
+dic_RE_chair_trt
+
+
+model_comparison_chair_trt <- tibble(
+  model = c(
+    "Fixed-effect",
+    "Random-effects"
+  ),
+  DIC = c(
+    dic_FE_chair_trt$dic,
+    dic_RE_chair_trt$dic
+  ),
+  residual_deviance = c(
+    dic_FE_chair_trt$resdev,
+    dic_RE_chair_trt$resdev
+  )
+)
+
+model_comparison_chair_trt
+
+
+
+```
+
+
+## 28_model choose
+
+```{r}
+fit_main_chair_trt <- fit_RE_chair_trt
+dic_main_chair_trt <- dic_RE_chair_trt
+
+```
+
+
+## 29_relative effects
+
+```{r}
+## 29_relative effects
+
+rel_effect_chair_trt <- relative_effects(
+  fit_main_chair_trt,
+  trt_ref = "usual care"
+)
+
+rel_effect_chair_trt
+
+plot(
+  rel_effect_chair_trt,
+  ref_line = 0,
+  stat = "halfeye"
+)
+
+summary(fit_main_chair_trt)
+
+rel_effect_chair_trt
+
+```
+
+
+## 30_general Ranking
+
+```{r}
+rank_chair_trt <- posterior_ranks(
+  fit_main_chair_trt,
+  lower_better = FALSE
+)
+
+rank_chair_trt
+
+plot(rank_chair_trt)
+
+rank_chair_trt
+
+```
+
+
+
+## 33_rank probabilities
+
+```{r}
+rank_probs_cum_chair_trt <- posterior_rank_probs(
+  fit_main_chair_trt,
+  lower_better = FALSE,
+  cumulative = TRUE
+)
+
+rank_probs_cum_chair_trt
+
+plot(rank_probs_cum_chair_trt)
+
+
+```
+
+
+## 35_Checking for inconsistency
+
+```{r}
+
+## 35_Checking for inconsistency
+
+
+fit_UME_RE_chair_trt <- nma(
+  net_trt_chair_stand,
+  seed = 25062026,
+  trt_effects = "random",
+  consistency = "ume",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_chair_trt
+summary(fit_UME_RE_chair_trt)
+
+
+dic_UME_RE_chair_trt <- dic(
+  fit_UME_RE_chair_trt
+)
+
+dic_main_chair_trt
+dic_UME_RE_chair_trt
+
+
+inconsistency_comparison_chair_trt <- tibble(
+  model = c(
+    "Consistency: random-effects",
+    "UME: random-effects"
+  ),
+  DIC = c(
+    dic_main_chair_trt$dic,
+    dic_UME_RE_chair_trt$dic
+  ),
+  residual_deviance = c(
+    dic_main_chair_trt$resdev,
+    dic_UME_RE_chair_trt$resdev
+  )
+)
+
+inconsistency_comparison_chair_trt
+
+
+plot(
+  dic_main_chair_trt,
+  dic_UME_RE_chair_trt,
+  show_uncertainty = FALSE
+)
+
+```
+
+
+### dose response overall 
+
+## 39_checking data
+
+```{r}
+## 39_checking data overall
+
+
+pf_chair_dose <- pf_chair_stand_std %>%
+  mutate(
+    y = standardised_arm_change,
+    overall = if_else(
+      agent == "usual care",
+      "usual care",
+      "exercise"
+    )
+  )
+
+pf_chair_overall_dose <- pf_chair_dose %>%
+  filter(
+    overall == "exercise",
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+
+pf_chair_dose %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+    n_scales = n_distinct(scale),
+    missing_weekly_dose = sum(is.na(weekly_dose)),
+    missing_y = sum(is.na(y)),
+    min_dose = min(weekly_dose, na.rm = TRUE),
+    p25_dose = quantile(weekly_dose, 0.25, na.rm = TRUE),
+    median_dose = median(weekly_dose, na.rm = TRUE),
+    mean_dose = mean(weekly_dose, na.rm = TRUE),
+    p75_dose = quantile(weekly_dose, 0.75, na.rm = TRUE),
+    max_dose = max(weekly_dose, na.rm = TRUE),
+    n_unique_dose = n_distinct(
+      weekly_dose,
+      na.rm = TRUE
+    )
+  )
+
+
+pf_chair_dose %>%
+  filter(overall == "usual care") %>%
+  summarise(
+    n_usual_care_arms = n(),
+    n_dose_zero = sum(
+      weekly_dose == 0,
+      na.rm = TRUE
+    ),
+    n_dose_missing = sum(
+      is.na(weekly_dose)
+    )
+  )
+
+
+pf_chair_dose %>%
+  filter(overall == "exercise") %>%
+  summarise(
+    n_exercise_arms = n(),
+    n_exercise_studies = n_distinct(studyID),
+    missing_weekly_dose_exercise = sum(
+      is.na(weekly_dose)
+    ),
+    min_exercise_dose = min(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+    p25_exercise_dose = quantile(
+      weekly_dose,
+      0.25,
+      na.rm = TRUE
+    ),
+    median_exercise_dose = median(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+    mean_exercise_dose = mean(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+    p75_exercise_dose = quantile(
+      weekly_dose,
+      0.75,
+      na.rm = TRUE
+    ),
+    max_exercise_dose = max(
+      weekly_dose,
+      na.rm = TRUE
+    ),
+    n_unique_exercise_dose = n_distinct(
+      weekly_dose,
+      na.rm = TRUE
+    )
+  )
+
+
+pf_chair_dose %>%
+  count(
+    agent,
+    is.na(weekly_dose),
+    sort = TRUE
+  )
+
+
+pf_chair_dose %>%
+  count(
+    trt,
+    is.na(weekly_dose),
+    sort = TRUE
+  )
+
+
+pf_chair_dose %>%
+  count(
+    overall,
+    sort = TRUE
+  )
+
+```
+
+## 40_exploratory graph overall
+
+```{r}
+## 40_exploratory graph overall
+
+if (!all(c("weekly_dose", "y", "overall") %in% names(pf_chair_dose))) {
+  stop(
+    "La tabla `pf_chair_dose` no tiene las columnas necesarias: ",
+    "'weekly_dose', 'y' y 'overall'"
+  )
+}
+
+
+pf_chair_overall_dose <- pf_chair_dose %>%
+  filter(
+    overall == "exercise",
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+
+lin_plot_chair <- ggplot(
+  pf_chair_overall_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red"
+  ) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    colour = "blue"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Standardized change in chair-stand performance",
+    title = "Linear regression"
+  ) +
+  theme_minimal()
+
+
+loess_plot_chair <- ggplot(
+  pf_chair_overall_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red"
+  ) +
+  geom_point() +
+  geom_smooth(
+    method = "loess",
+    colour = "gold"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Standardized change in chair-stand performance",
+    title = "LOESS"
+  ) +
+  theme_minimal()
+
+
+spline2_plot_chair <- ggplot(
+  pf_chair_overall_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red"
+  ) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ splines::ns(x, df = 2),
+    colour = "red"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Standardized change in chair-stand performance",
+    title = "Natural spline, 2 df"
+  ) +
+  theme_minimal()
+
+
+spline3_plot_chair <- ggplot(
+  pf_chair_overall_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red"
+  ) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ splines::ns(x, df = 3),
+    colour = "black"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Standardized change in chair-stand performance",
+    title = "Natural spline, 3 df"
+  ) +
+  theme_minimal()
+
+gridExtra::grid.arrange(
+  lin_plot_chair,
+  loess_plot_chair,
+  spline2_plot_chair,
+  spline3_plot_chair,
+  nrow = 2
+)
+
+```
+
+## 41_statistical comprobation overall
+
+```{r}
+## 41_statistical comprobation overall
+
+if (nrow(pf_chair_overall_dose) < 5) {
+  stop("No hay suficientes observaciones.")
+}
+
+
+lm_simple_chair <- lm(
+  y ~ weekly_dose,
+  data = pf_chair_overall_dose
+)
+
+lm_spline2_chair <- lm(
+  y ~ splines::ns(
+    weekly_dose,
+    df = 2
+  ),
+  data = pf_chair_overall_dose
+)
+
+lm_spline3_chair <- lm(
+  y ~ splines::ns(
+    weekly_dose,
+    df = 3
+  ),
+  data = pf_chair_overall_dose
+)
+
+
+anova_linear_vs_spline2_chair <-
+  anova(
+    lm_simple_chair,
+    lm_spline2_chair
+  )
+
+anova_linear_vs_spline3_chair <-
+  anova(
+    lm_simple_chair,
+    lm_spline3_chair
+  )
+
+anova_spline2_vs_spline3_chair <-
+  anova(
+    lm_spline2_chair,
+    lm_spline3_chair
+  )
+
+
+p_linear_chair <-
+  coef(
+    summary(
+      lm_simple_chair
+    )
+  )[
+    "weekly_dose",
+    "Pr(>|t|)"
+  ]
+
+p_linear_vs_ns2_chair <-
+  anova_linear_vs_spline2_chair$`Pr(>F)`[2]
+
+p_linear_vs_ns3_chair <-
+  anova_linear_vs_spline3_chair$`Pr(>F)`[2]
+
+p_ns2_vs_ns3_chair <-
+  anova_spline2_vs_spline3_chair$`Pr(>F)`[2]
+
+
+comparison_chair_overall <-
+  tibble(
+
+    outcome =
+      "Lower-limb strength",
+
+    n =
+      nrow(
+        pf_chair_overall_dose
+      ),
+
+    n_studies =
+      n_distinct(
+        pf_chair_overall_dose$studyID
+      ),
+
+    n_unique_dose =
+      n_distinct(
+        pf_chair_overall_dose$weekly_dose
+      ),
+
+    p_linear =
+      p_linear_chair,
+
+    p_linear_vs_ns2 =
+      p_linear_vs_ns2_chair,
+
+    p_linear_vs_ns3 =
+      p_linear_vs_ns3_chair,
+
+    p_ns2_vs_ns3 =
+      p_ns2_vs_ns3_chair,
+
+    AIC_linear =
+      AIC(
+        lm_simple_chair
+      ),
+
+    AIC_ns2 =
+      AIC(
+        lm_spline2_chair
+      ),
+
+    AIC_ns3 =
+      AIC(
+        lm_spline3_chair
+      ),
+
+    adjusted_R2_linear =
+      summary(
+        lm_simple_chair
+      )$adj.r.squared,
+
+    adjusted_R2_ns2 =
+      summary(
+        lm_spline2_chair
+      )$adj.r.squared,
+
+    adjusted_R2_ns3 =
+      summary(
+        lm_spline3_chair
+      )$adj.r.squared
+
+  ) %>%
+  mutate(
+
+    selected_model =
+      case_when(
+
+        p_linear_vs_ns2 < 0.05 &
+          (
+            is.na(
+              p_ns2_vs_ns3
+            ) |
+              p_ns2_vs_ns3 >= 0.05
+          ) ~
+          "Spline 2",
+
+        p_linear_vs_ns3 < 0.05 &
+          p_ns2_vs_ns3 < 0.05 ~
+          "Spline 3",
+
+        TRUE ~
+          "Linear"
+
+      )
+
+  )
+
+comparison_chair_overall
+
+
+model_fit_chair <-
+  tibble(
+
+    model =
+      c(
+        "Linear",
+        "Natural spline, 2 df",
+        "Natural spline, 3 df"
+      ),
+
+    df_residual =
+      c(
+        df.residual(
+          lm_simple_chair
+        ),
+        df.residual(
+          lm_spline2_chair
+        ),
+        df.residual(
+          lm_spline3_chair
+        )
+      ),
+
+    AIC =
+      c(
+        AIC(
+          lm_simple_chair
+        ),
+        AIC(
+          lm_spline2_chair
+        ),
+        AIC(
+          lm_spline3_chair
+        )
+      ),
+
+    R2 =
+      c(
+        summary(
+          lm_simple_chair
+        )$r.squared,
+
+        summary(
+          lm_spline2_chair
+        )$r.squared,
+
+        summary(
+          lm_spline3_chair
+        )$r.squared
+      ),
+
+    adjusted_R2 =
+      c(
+        summary(
+          lm_simple_chair
+        )$adj.r.squared,
+
+        summary(
+          lm_spline2_chair
+        )$adj.r.squared,
+
+        summary(
+          lm_spline3_chair
+        )$adj.r.squared
+      )
+
+  )
+
+model_fit_chair
+
+summary(lm_simple_chair)
+summary(lm_spline2_chair)
+summary(lm_spline3_chair)
+
+anova_linear_vs_spline2_chair
+anova_linear_vs_spline3_chair
+anova_spline2_vs_spline3_chair
+
+```
+
+## 43_dose optimal overall lineal model
+
+```{r}
+
+
+dose_grid_chair <- tibble(
+  weekly_dose = seq(
+    min(
+      pf_chair_overall_dose$weekly_dose
+    ),
+    max(
+      pf_chair_overall_dose$weekly_dose
+    ),
+    length.out = 500
+  )
+)
+
+
+pred <- predict(
+  lm_simple_chair,
+  newdata = dose_grid_chair,
+  interval = "confidence"
+)
+
+pred_df_chair <- bind_cols(
+  dose_grid_chair,
+  as.data.frame(pred)
+)
+
+
+max_row_chair <-
+  pred_df_chair %>%
+  slice_max(
+    fit,
+    n = 1
+  )
+
+maximum_dose_chair <-
+  max_row_chair$weekly_dose
+
+maximum_effect_chair <-
+  max_row_chair$fit
+
+summary_linear_chair <-
+  tibble(
+    estimated_maximum_dose =
+      maximum_dose_chair,
+    predicted_effect =
+      maximum_effect_chair
+  )
+
+summary_linear_chair
+
+
+p_chair_linear <-
+
+ggplot(
+  pf_chair_overall_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+
+geom_hline(
+  yintercept = 0,
+  linetype = "dashed"
+) +
+
+geom_point(
+  alpha = 0.65
+) +
+
+geom_ribbon(
+  data = pred_df_chair,
+  aes(
+    x = weekly_dose,
+    ymin = lwr,
+    ymax = upr
+  ),
+  inherit.aes = FALSE,
+  alpha = 0.20
+) +
+
+geom_line(
+  data = pred_df_chair,
+  aes(
+    x = weekly_dose,
+    y = fit
+  ),
+  inherit.aes = FALSE,
+  linewidth = 1
+) +
+
+geom_vline(
+  xintercept = maximum_dose_chair,
+  linetype = "dotted"
+) +
+
+annotate(
+  "text",
+  x = maximum_dose_chair,
+  y = max(
+    pred_df_chair$upr
+  ),
+  label = paste0(
+    "Maximum predicted\n",
+    round(
+      maximum_dose_chair,
+      0
+    ),
+    " AU/week"
+  ),
+  vjust = -0.4,
+  size = 3.5
+) +
+
+labs(
+  x = "Weekly exercise dose",
+  y = "Standardized improvement in lower-limb strength",
+  title = "Exploratory linear dose-response relationship"
+) +
+
+theme_minimal()
+
+p_chair_linear
+```
+
+
+## 43_dose optimal overall para fz tren inferior_exploratory
+
+```{r}
+
+
+dose_range_chair <- range(
+  pf_chair_overall_dose$weekly_dose,
+  na.rm = TRUE
+)
+
+
+dose_grid_chair_spline <- tibble(
+  weekly_dose = seq(
+    from = dose_range_chair[1],
+    to = dose_range_chair[2],
+    length.out = 5000
+  )
+)
+
+
+pred_chair_spline <- predict(
+  lm_spline2_chair,
+  newdata = dose_grid_chair_spline,
+  interval = "confidence",
+  level = 0.95
+)
+
+pred_df_chair_spline <- bind_cols(
+  dose_grid_chair_spline,
+  as.data.frame(pred_chair_spline)
+)
+
+
+optimal_row_chair_spline <- pred_df_chair_spline %>%
+  slice_max(
+    order_by = fit,
+    n = 1,
+    with_ties = FALSE
+  )
+
+optimal_dose_chair_spline <-
+  optimal_row_chair_spline$weekly_dose
+
+optimal_effect_chair_spline <-
+  optimal_row_chair_spline$fit
+
+optimal_effect_lwr_chair_spline <-
+  optimal_row_chair_spline$lwr
+
+optimal_effect_upr_chair_spline <-
+  optimal_row_chair_spline$upr
+
+
+grid_step_chair <-
+  dose_grid_chair_spline$weekly_dose[2] -
+  dose_grid_chair_spline$weekly_dose[1]
+
+internal_optimum_chair_spline <-
+  optimal_dose_chair_spline >
+    dose_range_chair[1] + grid_step_chair &
+  optimal_dose_chair_spline <
+    dose_range_chair[2] - grid_step_chair
+
+optimum_location_chair_spline <- case_when(
+  internal_optimum_chair_spline ~
+    "Internal maximum",
+
+  abs(
+    optimal_dose_chair_spline -
+      dose_range_chair[1]
+  ) <= grid_step_chair ~
+    "Lower boundary",
+
+  abs(
+    optimal_dose_chair_spline -
+      dose_range_chair[2]
+  ) <= grid_step_chair ~
+    "Upper boundary",
+
+  TRUE ~
+    "Undetermined"
+)
+
+
+optimal_dose_result_chair_spline <- tibble(
+  outcome = "Lower-limb strength",
+  model = "Natural spline, 2 df (exploratory)",
+  n_arms = nrow(pf_chair_overall_dose),
+  n_studies = n_distinct(
+    pf_chair_overall_dose$studyID
+  ),
+  observed_min_dose = dose_range_chair[1],
+  observed_max_dose = dose_range_chair[2],
+  estimated_optimal_dose =
+    optimal_dose_chair_spline,
+  predicted_effect =
+    optimal_effect_chair_spline,
+  predicted_effect_CI_low =
+    optimal_effect_lwr_chair_spline,
+  predicted_effect_CI_high =
+    optimal_effect_upr_chair_spline,
+  optimum_location =
+    optimum_location_chair_spline,
+  internal_optimum =
+    internal_optimum_chair_spline
+)
+
+optimal_dose_result_chair_spline
+
+
+p_optimal_chair_spline <- ggplot(
+  pf_chair_overall_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+
+  geom_point(
+    alpha = 0.65
+  ) +
+
+  geom_ribbon(
+    data = pred_df_chair_spline,
+    aes(
+      x = weekly_dose,
+      ymin = lwr,
+      ymax = upr
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.20
+  ) +
+
+  geom_line(
+    data = pred_df_chair_spline,
+    aes(
+      x = weekly_dose,
+      y = fit
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+
+  geom_vline(
+    xintercept = optimal_dose_chair_spline,
+    linetype = "dotted",
+    linewidth = 0.7
+  ) +
+
+  geom_point(
+    data = optimal_row_chair_spline,
+    aes(
+      x = weekly_dose,
+      y = fit
+    ),
+    inherit.aes = FALSE,
+    size = 3
+  ) +
+
+  annotate(
+    geom = "label",
+    x = optimal_dose_chair_spline,
+    y = optimal_effect_chair_spline,
+    label = paste0(
+      "Exploratory maximum: ",
+      round(optimal_dose_chair_spline, 0),
+      " dose units/week\n",
+      "Predicted effect: ",
+      round(optimal_effect_chair_spline, 2)
+    ),
+    hjust = ifelse(
+      optimal_dose_chair_spline >
+        mean(dose_range_chair),
+      1.05,
+      -0.05
+    ),
+    vjust = -0.7,
+    size = 3.3
+  ) +
+
+  labs(
+    x = "Weekly exercise dose",
+    y = "Standardized improvement in lower-limb strength",
+    title = paste0(
+      "Exploratory spline dose-response: ",
+      "lower-limb strength"
+    ),
+    subtitle = paste0(
+      "Natural spline with 2 df; ",
+      "the primary selected model was linear"
+    ),
+    caption = paste0(
+      "The marked dose is the maximum predicted value ",
+      "within the observed dose range."
+    )
+  ) +
+
+  theme_minimal()
+
+p_optimal_chair_spline
+
+```
+
+
+## 46_dose optimal exploracion inicial
+
+```{r}
+
+
+pf_chair_dose_agent <- pf_chair_dose %>%
+  filter(
+    agent %in% c(
+      "multicomponent",
+      "resistance",
+      "aerobic"
+    ),
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+agent_split_chair <- split(
+  pf_chair_dose_agent,
+  pf_chair_dose_agent$agent
+)
+
+comparison_agent_chair <- purrr::map_dfr(
+  names(agent_split_chair),
+  function(nombre_agent){
+
+    datos <- agent_split_chair[[nombre_agent]]
+
+    modelo_lin <- lm(
+      y ~ weekly_dose,
+      data = datos
+    )
+
+    modelo_ns2 <- lm(
+      y ~ splines::ns(
+        weekly_dose,
+        df = 2
+      ),
+      data = datos
+    )
+
+    modelo_ns3 <- lm(
+      y ~ splines::ns(
+        weekly_dose,
+        df = 3
+      ),
+      data = datos
+    )
+
+    anova_lin_ns2 <- anova(
+      modelo_lin,
+      modelo_ns2
+    )
+
+    anova_lin_ns3 <- anova(
+      modelo_lin,
+      modelo_ns3
+    )
+
+    anova_ns2_ns3 <- anova(
+      modelo_ns2,
+      modelo_ns3
+    )
+
+    tibble(
+
+      agent = nombre_agent,
+
+      n_arms = nrow(datos),
+
+      n_studies =
+        n_distinct(datos$studyID),
+
+      n_unique_doses =
+        n_distinct(datos$weekly_dose),
+
+      p_linear =
+        coef(summary(modelo_lin))[
+          "weekly_dose",
+          "Pr(>|t|)"
+        ],
+
+      p_linear_vs_ns2 =
+        anova_lin_ns2$`Pr(>F)`[2],
+
+      p_linear_vs_ns3 =
+        anova_lin_ns3$`Pr(>F)`[2],
+
+      p_ns2_vs_ns3 =
+        anova_ns2_ns3$`Pr(>F)`[2],
+
+      AIC_linear =
+        AIC(modelo_lin),
+
+      AIC_ns2 =
+        AIC(modelo_ns2),
+
+      AIC_ns3 =
+        AIC(modelo_ns3),
+
+      adjR2_linear =
+        summary(modelo_lin)$adj.r.squared,
+
+      adjR2_ns2 =
+        summary(modelo_ns2)$adj.r.squared,
+
+      adjR2_ns3 =
+        summary(modelo_ns3)$adj.r.squared,
+
+      selected_model =
+        case_when(
+
+          anova_lin_ns2$`Pr(>F)`[2] < 0.05 &
+          anova_ns2_ns3$`Pr(>F)`[2] >= 0.05
+          ~ "Spline 2 df",
+
+          anova_lin_ns3$`Pr(>F)`[2] < 0.05 &
+          anova_ns2_ns3$`Pr(>F)`[2] < 0.05
+          ~ "Spline 3 df",
+
+          TRUE
+          ~ "Linear"
+
+        )
+
+    )
+
+  }
+
+)
+
+comparison_agent_chair
+
+```
+
+
+
+### BALANCE # Lower is better = FALSE
+
+## 1_filter domain 
+
+```{r} 
+
+
+pf_balance <- data %>%
+  filter(
+    outcome == "physical function",
+    scale %in% c(
+      "FAB",
+      "FRT(cm)",
+      "OLS_D ",
+      "OLS_I ",
+      "OLS_EO_R",
+      "OLS_EO_L",
+      "OLS-EC-R",
+      "OLS-EC-L",
+      "SLS _do(s)",
+      "SLS _Nodo(s)",
+      "SLST",
+      "TS-EO",
+      "TS-EC"
+    )
+  ) %>%
+  mutate(
+    y = as.numeric(y),
+    se = as.numeric(se),
+    postn = as.numeric(postn),
+    premean = as.numeric(premean),
+    weekly_dose = as.numeric(weekly_dose)
+  )
+```
+
+
+## 2_Cheking networks and models
+
+```{r} 
+
+pf_balance %>%
+  count(
+    studyID,
+    scale,
+    agent,
+    trt,
+    name = "n_rows"
+  ) %>%
+  arrange(
+    studyID,
+    scale,
+    agent,
+    trt
+  )
+
+pf_balance %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+    n_scales = n_distinct(scale),
+    n_agents = n_distinct(agent),
+    n_treatments = n_distinct(trt),
+    missing_y = sum(is.na(y)),
+    missing_se = sum(is.na(se)),
+    missing_postn = sum(is.na(postn)),
+    missing_premean = sum(is.na(premean)),
+    missing_weekly_dose = sum(is.na(weekly_dose))
+  )
+
+sort(unique(pf_balance$scale))
+sort(unique(pf_balance$agent))
+sort(unique(pf_balance$trt))
+
+pf_balance %>%
+  group_by(studyID) %>%
+  summarise(
+    n_rows = n(),
+    n_agents = n_distinct(agent),
+    n_treatments = n_distinct(trt),
+    n_scales = n_distinct(scale),
+    .groups = "drop"
+  ) %>%
+  arrange(n_rows)
+
+pf_balance %>%
+  count(
+    studyID,
+    scale,
+    agent,
+    trt
+  ) %>%
+  filter(n > 1) %>%
+  arrange(
+    desc(n),
+    studyID
+  )
+```
+
+### Meta-Analysis Model For Agent
+
+## 3_Creation red_Agent
+
+```{r}
+
+
+pf_balance <- pf_balance %>%
+  filter(
+    !agent %in% c(
+      "aerobic",
+      "stretching"
+    )
+  )
+
+mean_premean_balance <- mean(
+  pf_balance$premean,
+  na.rm = TRUE
+)
+
+pf_balance <- pf_balance %>%
+  mutate(
+    premean_c = premean - mean_premean_balance
+  )
+
+pf_balance %>%
+  summarise(
+    mean_premean = mean(
+      premean,
+      na.rm = TRUE
+    ),
+    mean_premean_c = mean(
+      premean_c,
+      na.rm = TRUE
+    ),
+    min_premean_c = min(
+      premean_c,
+      na.rm = TRUE
+    ),
+    max_premean_c = max(
+      premean_c,
+      na.rm = TRUE
+    )
+  )
+
+pf_balance %>%
+  count(
+    agent,
+    sort = TRUE
+  )
+
+pf_balance %>%
+  count(
+    studyID,
+    name = "n_arms"
+  ) %>%
+  arrange(
+    n_arms,
+    studyID
+  )
+
+pf_balance %>%
+  count(
+    studyID,
+    name = "n_arms"
+  ) %>%
+  filter(
+    n_arms < 2
+  )
+
+net_balance_agent <- set_agd_arm(
+  pf_balance,
+  study = studyID,
+  trt = agent,
+  y = y,
+  se = se,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+net_balance_agent
+
+plot(
+  net_balance_agent,
+  weight_edges = TRUE,
+  weight_nodes = TRUE
+)
+
+```
+
+## 4_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+fit_FE_balance <- nma(
+  net_balance_agent,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1)
+)
+
+fit_FE_balance
+
+```
+
+## 5_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_balance <- nma(
+  net_balance_agent,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_RE_balance
+
+```
+
+## 6_Model 3:Fixed-effect meta-analysis with covariate `premean`
+
+```{r}
+fit_FE_reg_balance <- nma(
+  net_balance_agent,
+  seed = 25062026,
+  trt_effects = "fixed",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  adapt_delta = 0.99
+)
+
+fit_FE_reg_balance
+```
+
+## 7_Model 4:Random-effects meta-analysis with covariate `premean`
+
+```{r}
+fit_RE_reg_balance <- nma(
+  net_balance_agent,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_RE_reg_balance
+
+```
+
+## 8_Model comparation
+
+```{r}
+
+dic_FE_balance <- dic(
+  fit_FE_balance
+)
+
+dic_RE_balance <- dic(
+  fit_RE_balance
+)
+
+dic_FE_reg_balance <- dic(
+  fit_FE_reg_balance
+)
+
+dic_RE_reg_balance <- dic(
+  fit_RE_reg_balance
+)
+
+dic_FE_balance
+dic_RE_balance
+dic_FE_reg_balance
+dic_RE_reg_balance
+
+```
+
+
+## 10_model choose
+
+```{r}
+## 10_model choose
+
+fit_main_balance <- fit_RE_reg_balance
+dic_main_balance <- dic_RE_reg_balance
+
+```
+
+
+## 11_relative effects
+
+```{r}
+## 11_relative effects
+
+pf_balance %>%
+  summarise(
+    min_premean = min(premean, na.rm = TRUE),
+    mean_premean = mean(premean, na.rm = TRUE),
+    median_premean = median(premean, na.rm = TRUE),
+    max_premean = max(premean, na.rm = TRUE)
+  )
+
+
+mean_premean_balance <- mean(
+  pf_balance$premean,
+  na.rm = TRUE
+)
+
+rel_effect_balance <- relative_effects(
+  fit_main_balance,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline balance",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rel_effect_balance
+
+plot(
+  rel_effect_balance,
+  ref_line = 0,
+  stat = "halfeye"
+)
+
+```
+
+
+## 12_general Ranking
+
+```{r}
+rank_balance <- posterior_ranks(
+  fit_main_balance,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline balance",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rank_balance
+
+plot(rank_balance)
+
+
+```
+
+
+## 15_rank probabilities
+
+```{r}
+rank_probs_cum_balance <- posterior_rank_probs(
+  fit_main_balance,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline balance",
+    premean_c = 0
+  ),
+  study = studyID,
+  cumulative = TRUE
+)
+
+rank_probs_cum_balance
+
+plot(rank_probs_cum_balance)
+
+```
+
+## 17_Checking for inconsistency
+
+```{r}
+
+
+fit_UME_RE_reg_balance <- nma(
+  net_balance_agent,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  consistency = "ume",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_reg_balance
+
+summary(fit_UME_RE_reg_balance)
+
+
+dic_UME_RE_reg_balance <- dic(
+  fit_UME_RE_reg_balance
+)
+
+dic_main_balance
+
+dic_UME_RE_reg_balance
+
+
+inconsistency_comparison_balance <- tibble(
+  model = c(
+    "Consistency: random-effects + premean_c",
+    "UME: random-effects + premean_c"
+  ),
+  DIC = c(
+    dic_main_balance$dic,
+    dic_UME_RE_reg_balance$dic
+  ),
+  residual_deviance = c(
+    dic_main_balance$resdev,
+    dic_UME_RE_reg_balance$resdev
+  ),
+  effective_parameters = c(
+    dic_main_balance$pD,
+    dic_UME_RE_reg_balance$pD
+  )
+)
+
+inconsistency_comparison_balance
+
+
+plot(
+  dic_main_balance,
+  dic_UME_RE_reg_balance,
+  show_uncertainty = FALSE
+)
+```
+
+
+## 20_posterior predictive distribution
+
+```{r}
+## Predictive distribution
+
+
+rel_effect_pred_balance <- relative_effects(
+  fit_main_balance,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline balance",
+    premean_c = 0
+  ),
+  study = studyID,
+  predictive_distribution = TRUE
+)
+
+rel_effect_pred_balance
+
+prob_harm_balance <- colMeans(
+  as.matrix(rel_effect_pred_balance) < 0
+)
+
+prob_harm_balance
+
+```
+
+
+### Meta-Analysis Model For Trt
+## 21_Net Agent and Trt
+
+```{r}
+mean_premean_balance <- mean(
+  pf_balance$premean,
+  na.rm = TRUE
+)
+
+pf_balance <- pf_balance %>%
+  mutate(
+    premean_c = premean - mean_premean_balance
+  )
+
+pf_balance <- pf_balance %>%
+  mutate(
+    trt = case_when(
+      trt == "Tai Chi" ~ "mind body",
+      trt == "functional" ~ "resistance training",
+      trt == "aerobic+resistance+stretching" ~ "aerobic+resistance",
+      TRUE ~ trt
+    )
+  )
+
+pf_balance %>%
+  count(
+    trt,
+    sort = TRUE
+  )
+
+pf_balance %>%
+  count(
+    studyID,
+    name = "n_arms"
+  ) %>%
+  filter(
+    n_arms < 2
+  )
+
+net_balance_trt <- set_agd_arm(
+  pf_balance,
+  study = studyID,
+  trt = trt,
+  y = y,
+  se = se,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+net_balance_trt
+
+plot(
+  net_balance_trt,
+  weight_edges = TRUE,
+  weight_nodes = TRUE
+)
+
+```
+
+## 22_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+fit_FE_balance <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1)
+)
+
+fit_FE_balance
+
+```
+
+## 23_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_balance <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5)
+)
+
+fit_RE_balance
+
+```
+
+## 24_Model 3:Fixed-effect meta-analysis with covariate `premean`
+
+```{r}
+fit_FE_reg_balance <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "fixed",
+  regression = ~ .trt:premean,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  adapt_delta = 0.99
+)
+
+fit_FE_reg_balance
+
+```
+
+## 25_Model 4:Random-effects meta-analysis with covariate `premean`
+
+```{r}
+fit_RE_reg_balance <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_RE_reg_balance
+
+```
+
+## 26_Model comparation
+
+```{r}
+dic_FE_balance <- dic(fit_FE_balance)
+dic_RE_balance <- dic(fit_RE_balance)
+dic_FE_reg_balance <- dic(fit_FE_reg_balance)
+dic_RE_reg_balance <- dic(fit_RE_reg_balance)
+
+dic_FE_balance
+dic_RE_balance
+dic_FE_reg_balance
+dic_RE_reg_balance
+
+
+model_comparison_balance <- tibble(
+  model = c(
+    "Fixed-effect",
+    "Random-effects",
+    "Fixed-effect + premean",
+    "Random-effects + premean"
+  ),
+  DIC = c(
+    dic_FE_balance$dic,
+    dic_RE_balance$dic,
+    dic_FE_reg_balance$dic,
+    dic_RE_reg_balance$dic
+  ),
+  residual_deviance = c(
+    dic_FE_balance$resdev,
+    dic_RE_balance$resdev,
+    dic_FE_reg_balance$resdev,
+    dic_RE_reg_balance$resdev
+  )
+)
+
+model_comparison_balance
+
+
+```
+
+## 27_check
+
+```{r}
+plot(dic_FE_balance)
+plot(dic_RE_balance)
+plot(dic_FE_reg_balance)
+plot(dic_RE_reg_balance)
+
+```
+
+
+## 28_model choose
+
+```{r}
+fit_main_balance <- fit_RE_reg_balance
+dic_main_balance <- dic_RE_reg_balance
+
+```
+
+
+## 29_relative effects
+
+```{r}
+pf_balance %>%
+  summarise(
+    min_premean = min(premean, na.rm = TRUE),
+    mean_premean = mean(premean, na.rm = TRUE),
+    median_premean = median(premean, na.rm = TRUE),
+    max_premean = max(premean, na.rm = TRUE)
+  )
+
+
+mean_premean_balance <- mean(pf_balance$premean, na.rm = TRUE)
+
+rel_effect_balance <- relative_effects(
+  fit_main_balance,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline gait speed",
+    premean = mean_premean_balance),
+study = studyID)
+
+rel_effect_balance
+
+plot(rel_effect_balance, ref_line = 0, stat = "halfeye")
+
+
+
+summary(fit_main_balance) 
+rel_effect_balance
+```
+
+
+## 30_general Ranking
+
+```{r}
+rank_balance <- posterior_ranks(
+  fit_main_balance,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline gait speed",
+    premean = mean_premean_balance),
+study = studyID)
+
+rank_balance
+plot(rank_balance)
+
+
+rank_balance
+```
+
+
+## 33_rank probabilities
+
+```{r}
+rank_probs_cum_balance <- posterior_rank_probs(
+  fit_main_balance,
+  lower_better = FALSE,
+  newdata = tibble(studyID = "Mean baseline gait speed",
+    premean = mean_premean_balance),
+study = studyID,
+  cumulative = TRUE
+)
+
+rank_probs_cum_balance
+plot(rank_probs_cum_balance)
+```
+
+
+
+## 35_Checking for inconsistency
+
+```{r}
+
+fit_UME_RE_reg_balance <- nma(
+  net_agent,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean,
+  consistency = "ume",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_reg_balance
+summary(fit_UME_RE_reg_balance)
+
+
+dic_UME_RE_reg_balance <- dic(fit_UME_RE_reg_balance)
+
+dic_main_balance
+dic_UME_RE_reg_balance
+
+
+inconsistency_comparison_balance <- tibble(
+  model = c(
+    "Consistency: random-effects + premean",
+    "UME: random-effects + premean"
+  ),
+  DIC = c(
+    dic_main_balance$dic,
+    dic_UME_RE_reg_balance$dic
+  ),
+  residual_deviance = c(
+    dic_main_balance$resdev,
+    dic_UME_RE_reg_balance$resdev
+  )
+)
+
+inconsistency_comparison_balance
+
+
+
+plot(
+  dic_main_balance,
+  dic_UME_RE_reg_balance,
+  show_uncertainty = FALSE
+)
+```
+
+
+## 38_posterior predictive distribution
+
+```{r}
+
+
+rel_effect_pred_balance <- relative_effects(
+  fit_main_balance,
+  trt_ref = "usual care",
+  newdata = tibble(studyID = "Mean baseline gait speed",
+    premean = mean_premean_balance),
+study = studyID,
+  predictive_distribution = TRUE
+)
+
+rel_effect_pred_balance
+
+prob_harm_balance <- colMeans(as.matrix(rel_effect_pred_balance) < 0)
+
+prob_harm_balance
+
+```
+
+### dose response overall 
+
+
+## 39_checking data
+
+```{r}
+### dose response overall
+
+pf_balance_dose <- pf_balance %>%
+  filter(
+    agent != "usual care",
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+## 39_checking data
+
+pf_balance %>%
+  summarise(
+    n_rows = n(),
+    missing_weekly_dose = sum(is.na(weekly_dose)),
+    missing_y = sum(is.na(y)),
+    min_dose = min(weekly_dose, na.rm = TRUE),
+    p25_dose = quantile(weekly_dose, 0.25, na.rm = TRUE),
+    median_dose = median(weekly_dose, na.rm = TRUE),
+    mean_dose = mean(weekly_dose, na.rm = TRUE),
+    p75_dose = quantile(weekly_dose, 0.75, na.rm = TRUE),
+    max_dose = max(weekly_dose, na.rm = TRUE),
+    n_unique_dose = n_distinct(weekly_dose, na.rm = TRUE)
+  )
+
+pf_balance %>%
+  count(
+    agent,
+    dose_missing = is.na(weekly_dose)
+  ) %>%
+  arrange(
+    agent,
+    dose_missing
+  )
+
+pf_balance %>%
+  count(
+    trt,
+    dose_missing = is.na(weekly_dose)
+  ) %>%
+  arrange(
+    trt,
+    dose_missing
+  )
+
+pf_balance %>%
+  filter(
+    !is.na(weekly_dose),
+    !is.na(y)
+  ) %>%
+  summarise(
+    n_arms_with_dose = n(),
+    n_studies_with_dose = n_distinct(studyID),
+    n_agents_with_dose = n_distinct(agent),
+    n_treatments_with_dose = n_distinct(trt)
+  )
+
+pf_balance %>%
+  filter(
+    !is.na(weekly_dose)
+  ) %>%
+  group_by(agent) %>%
+  summarise(
+    n_arms = n(),
+    n_studies = n_distinct(studyID),
+    min_dose = min(weekly_dose),
+    median_dose = median(weekly_dose),
+    max_dose = max(weekly_dose),
+    n_unique_dose = n_distinct(weekly_dose),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_arms))
+```
+
+## 40_exploratory graph overall
+
+```{r}
+## 40_exploratory graph overall
+
+lin_plot_balance <- ggplot(
+  pf_balance_overall_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red"
+  ) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    colour = "blue"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Standardized improvement in balance",
+    title = "Linear regression"
+  ) +
+  theme_minimal()
+
+
+loess_plot_balance <- ggplot(
+  pf_balance_overall_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red"
+  ) +
+  geom_point() +
+  geom_smooth(
+    method = "loess",
+    se = TRUE,
+    colour = "gold"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Standardized improvement in balance",
+    title = "LOESS"
+  ) +
+  theme_minimal()
+
+
+
+spline2_plot_balance <- ggplot(
+  pf_balance_overall_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red"
+  ) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ splines::ns(x, df = 2),
+    se = TRUE,
+    colour = "red"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Standardized improvement in balance",
+    title = "Natural spline (2 df)"
+  ) +
+  theme_minimal()
+
+
+
+spline3_plot_balance <- ggplot(
+  pf_balance_overall_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red"
+  ) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ splines::ns(x, df = 3),
+    se = TRUE,
+    colour = "black"
+  ) +
+  labs(
+    x = "Weekly exercise dose",
+    y = "Standardized improvement in balance",
+    title = "Natural spline (3 df)"
+  ) +
+  theme_minimal()
+
+
+gridExtra::grid.arrange(
+  lin_plot_balance,
+  loess_plot_balance,
+  spline2_plot_balance,
+  spline3_plot_balance,
+  nrow = 2
+)
+```
+
+## 41_statistical comprobation overall
+
+```{r}
+## 41_statistical comprobation overall
+
+
+
+lm_simple_balance <- lm(
+  y ~ weekly_dose,
+  data = pf_balance_overall_dose
+)
+
+
+
+lm_spline2_balance <- lm(
+  y ~ splines::ns(
+    weekly_dose,
+    df = 2
+  ),
+  data = pf_balance_overall_dose
+)
+
+
+
+lm_spline3_balance <- lm(
+  y ~ splines::ns(
+    weekly_dose,
+    df = 3
+  ),
+  data = pf_balance_overall_dose
+)
+
+
+
+anova_linear_vs_spline2_balance <-
+  anova(
+    lm_simple_balance,
+    lm_spline2_balance
+  )
+
+anova_linear_vs_spline3_balance <-
+  anova(
+    lm_simple_balance,
+    lm_spline3_balance
+  )
+
+anova_spline2_vs_spline3_balance <-
+  anova(
+    lm_spline2_balance,
+    lm_spline3_balance
+  )
+
+
+
+comparison_balance_overall <-
+  tibble(
+
+    outcome = "Balance",
+
+    n =
+      nrow(
+        pf_balance_overall_dose
+      ),
+
+    n_studies =
+      n_distinct(
+        pf_balance_overall_dose$studyID
+      ),
+
+    n_unique_doses =
+      n_distinct(
+        pf_balance_overall_dose$weekly_dose
+      ),
+
+    p_linear =
+      coef(
+        summary(
+          lm_simple_balance
+        )
+      )[
+        "weekly_dose",
+        "Pr(>|t|)"
+      ],
+
+    p_linear_vs_spline2 =
+      anova_linear_vs_spline2_balance$`Pr(>F)`[2],
+
+    p_linear_vs_spline3 =
+      anova_linear_vs_spline3_balance$`Pr(>F)`[2],
+
+    p_spline2_vs_spline3 =
+      anova_spline2_vs_spline3_balance$`Pr(>F)`[2],
+
+    AIC_linear =
+      AIC(
+        lm_simple_balance
+      ),
+
+    AIC_spline2 =
+      AIC(
+        lm_spline2_balance
+      ),
+
+    AIC_spline3 =
+      AIC(
+        lm_spline3_balance
+      ),
+
+    adjR2_linear =
+      summary(
+        lm_simple_balance
+      )$adj.r.squared,
+
+    adjR2_spline2 =
+      summary(
+        lm_spline2_balance
+      )$adj.r.squared,
+
+    adjR2_spline3 =
+      summary(
+        lm_spline3_balance
+      )$adj.r.squared,
+
+    selected_model =
+      case_when(
+
+        p_linear_vs_spline2 < 0.05 &
+          p_spline2_vs_spline3 >= 0.05 ~
+          "Spline 2 df",
+
+        p_linear_vs_spline3 < 0.05 &
+          p_spline2_vs_spline3 < 0.05 ~
+          "Spline 3 df",
+
+        TRUE ~
+          "Linear"
+
+      )
+
+  )
+
+comparison_balance_overall
+
+```
+
+
+## 43_dose optimal overall para balance
+
+```{r}
+
+
+doses_balance <- seq(
+  from = min(
+    pf_balance_dose$weekly_dose,
+    na.rm = TRUE
+  ),
+  to = max(
+    pf_balance_dose$weekly_dose,
+    na.rm = TRUE
+  ),
+  length.out = 1000
+)
+
+pred_df_balance <- data.frame(
+  weekly_dose = doses_balance
+)
+
+pred_balance <- predict(
+  lm_simple_balance,
+  newdata = pred_df_balance,
+  interval = "confidence",
+  level = 0.95
+)
+
+pred_df_balance <- pred_df_balance %>%
+  mutate(
+    predicted = pred_balance[, "fit"],
+    lower = pred_balance[, "lwr"],
+    upper = pred_balance[, "upr"]
+  )
+
+optimal_index_balance <- which.max(
+  pred_df_balance$predicted
+)
+
+optimal_dose_balance <-
+  pred_df_balance$weekly_dose[optimal_index_balance]
+
+optimal_response_balance <-
+  pred_df_balance$predicted[optimal_index_balance]
+
+cat(
+  "dose con mayor respuesta predicha dentro del rango observado:",
+  round(optimal_dose_balance, 1),
+  "MET-min/week\n"
+)
+
+cat(
+  "Cambio estimado en balance:",
+  round(optimal_response_balance, 3),
+  "\n"
+)
+```
+
+## 44_optimal dose graph overall
+
+```{r}
+
+ggplot(
+  pf_balance_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_point(
+    alpha = 0.6
+  ) +
+  geom_ribbon(
+    data = pred_df_balance,
+    aes(
+      x = weekly_dose,
+      ymin = lower,
+      ymax = upper
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.2
+  ) +
+  geom_line(
+    data = pred_df_balance,
+    aes(
+      x = weekly_dose,
+      y = predicted
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  geom_vline(
+    xintercept = optimal_dose_balance,
+    linetype = "dashed"
+  ) +
+  annotate(
+    geom = "text",
+    x = optimal_dose_balance,
+    y = optimal_response_balance,
+    label = paste0(
+      "Highest predicted response\n",
+      round(optimal_dose_balance, 0),
+      " MET-min/week"
+    ),
+    hjust = 1.05,
+    vjust = -0.5
+  ) +
+  labs(
+    x = "Weekly exercise dose (MET-min/week)",
+    y = "Change in balance performance",
+    title = "Linear dose-response association for balance"
+  ) +
+  theme_minimal()
+```
+## 44.1_Exploratory spline
+
+```{r}
+
+lm_spline_expl_balance <- lm(
+  y ~ splines::ns(weekly_dose, df = 3),
+  data = pf_balance_dose
+)
+
+pred_df_spline_balance <- data.frame(
+  weekly_dose = seq(
+    min(pf_balance_dose$weekly_dose),
+    max(pf_balance_dose$weekly_dose),
+    length.out = 1000
+  )
+)
+
+pred_balance_spline <- predict(
+  lm_spline_expl_balance,
+  newdata = pred_df_spline_balance,
+  interval = "confidence"
+)
+
+pred_df_spline_balance <- pred_df_spline_balance %>%
+  mutate(
+    predicted = pred_balance_spline[, "fit"],
+    lower = pred_balance_spline[, "lwr"],
+    upper = pred_balance_spline[, "upr"]
+  )
+
+optimal_index_spline_balance <-
+  which.max(pred_df_spline_balance$predicted)
+
+optimal_dose_spline_balance <-
+  pred_df_spline_balance$weekly_dose[
+    optimal_index_spline_balance
+  ]
+
+optimal_response_spline_balance <-
+  pred_df_spline_balance$predicted[
+    optimal_index_spline_balance
+  ]
+
+cat(
+  "Exploratory spline maximum:",
+  round(optimal_dose_spline_balance,1),
+  "MET-min/week\n"
+)
+
+cat(
+  "Predicted response:",
+  round(optimal_response_spline_balance,3),
+  "\n"
+)
+ggplot(
+  pf_balance_dose,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_point(
+    alpha = 0.6
+  ) +
+  geom_ribbon(
+    data = pred_df_spline_balance,
+    aes(
+      x = weekly_dose,
+      ymin = lower,
+      ymax = upper
+    ),
+    alpha = 0.20,
+    inherit.aes = FALSE
+  ) +
+  geom_line(
+    data = pred_df_spline_balance,
+    aes(
+      x = weekly_dose,
+      y = predicted
+    ),
+    colour = "blue",
+    linewidth = 1.2,
+    inherit.aes = FALSE
+  ) +
+  geom_vline(
+    xintercept = optimal_dose_spline_balance,
+    linetype = 2,
+    colour = "red"
+  ) +
+  annotate(
+    "text",
+    x = optimal_dose_spline_balance,
+    y = optimal_response_spline_balance,
+    label = paste0(
+      "Exploratory maximum\n",
+      round(optimal_dose_spline_balance),
+      " MET-min/week"
+    ),
+    colour = "red",
+    hjust = 1.05,
+    vjust = -0.5
+  ) +
+  labs(
+    x = "Weekly exercise dose (MET-min/week)",
+    y = "Change in balance performance",
+    title = "Exploratory spline dose-response curve"
+  ) +
+  theme_minimal()
+```
+
+
+## COGNITION
+### COGNICION GLOBAL # Lower is better = FALSE
+
+## 1_filter domain 
+
+```{r} 
+## 1. Filter global cognition
+
+co_coglobal <- data %>%
+  filter(
+    outcome == "cognition",
+    scale %in% c(
+      "MMSE_Sco",
+      "MMSE_short",
+      "MOCA_Sco",
+      "MEC35_Sco"
+    )
+  ) %>%
+  mutate(
+    y = as.numeric(y),
+    se = as.numeric(se),
+    postn = as.numeric(postn),
+    premean = as.numeric(premean),
+    weekly_dose = as.numeric(weekly_dose)
+  ) %>%
+  filter(
+    !is.na(y),
+    !is.na(se),
+    !is.na(postn),
+    !is.na(premean),
+    !is.na(weekly_dose)
+  )
+
+cat("Studies:", dplyr::n_distinct(co_coglobal$studyID), "\n")
+cat("Study arms:", nrow(co_coglobal), "\n")
+cat("Treatments:", dplyr::n_distinct(co_coglobal$trt), "\n")
+cat("Agents:", dplyr::n_distinct(co_coglobal$agent), "\n")
+
+```
+
+
+## 2_Cheking networks and models
+
+```{r} 
+
+
+co_coglobal %>%
+  count(
+    studyID,
+    scale,
+    agent,
+    trt,
+    name = "n"
+  ) %>%
+  arrange(
+    studyID,
+    agent,
+    trt
+  )
+
+
+
+
+co_coglobal %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+    n_scales = n_distinct(scale),
+    n_agents = n_distinct(agent),
+    n_treatments = n_distinct(trt),
+
+    missing_y = sum(is.na(y)),
+    missing_se = sum(is.na(se)),
+    missing_postn = sum(is.na(postn)),
+    missing_premean = sum(is.na(premean)),
+    missing_weekly_dose = sum(is.na(weekly_dose))
+  )
+
+
+
+
+cat("\nScales:\n")
+print(sort(unique(co_coglobal$scale)))
+
+cat("\nAgents:\n")
+print(sort(unique(co_coglobal$agent)))
+
+cat("\nTreatments:\n")
+print(sort(unique(co_coglobal$trt)))
+
+
+
+
+agent_summary_coglobal <- co_coglobal %>%
+  group_by(agent) %>%
+  summarise(
+    n_arms = n(),
+    n_studies = n_distinct(studyID),
+    n_participants = sum(postn, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_studies), desc(n_arms))
+
+print(agent_summary_coglobal)
+
+
+
+
+study_summary_coglobal <- co_coglobal %>%
+  group_by(studyID) %>%
+  summarise(
+    n_arms = n(),
+    n_agents = n_distinct(agent),
+    agents = paste(sort(unique(agent)), collapse = " | "),
+    .groups = "drop"
+  ) %>%
+  arrange(n_arms, studyID)
+
+print(study_summary_coglobal)
+
+
+
+
+single_arm_studies_coglobal <- study_summary_coglobal %>%
+  filter(n_arms < 2)
+
+if (nrow(single_arm_studies_coglobal) == 0) {
+
+  cat("\nNo single-arm studies detected.\n")
+
+} else {
+
+  cat("\nWARNING: single-arm studies detected:\n")
+  print(single_arm_studies_coglobal)
+}
+
+
+
+
+same_agent_studies_coglobal <- study_summary_coglobal %>%
+  filter(n_agents < 2)
+
+if (nrow(same_agent_studies_coglobal) == 0) {
+
+  cat("\nAll studies compare at least two different agents.\n")
+
+} else {
+
+  cat(
+    "\nStudies with multiple arms but only one agent category:\n"
+  )
+  print(same_agent_studies_coglobal)
+}
+
+
+
+duplicates_coglobal <- co_coglobal %>%
+  count(
+    studyID,
+    scale,
+    agent,
+    trt,
+    y,
+    se,
+    postn,
+    name = "n"
+  ) %>%
+  filter(n > 1)
+
+if (nrow(duplicates_coglobal) == 0) {
+
+  cat("\nNo exact duplicate rows detected.\n")
+
+} else {
+
+  cat("\nWARNING: possible exact duplicates detected:\n")
+  print(duplicates_coglobal)
+}
+
+
+
+co_coglobal %>%
+  summarise(
+    min_y = min(y, na.rm = TRUE),
+    max_y = max(y, na.rm = TRUE),
+
+    min_se = min(se, na.rm = TRUE),
+    max_se = max(se, na.rm = TRUE),
+
+    min_postn = min(postn, na.rm = TRUE),
+    max_postn = max(postn, na.rm = TRUE),
+
+    min_premean = min(premean, na.rm = TRUE),
+    max_premean = max(premean, na.rm = TRUE),
+
+    min_weekly_dose = min(weekly_dose, na.rm = TRUE),
+    max_weekly_dose = max(weekly_dose, na.rm = TRUE)
+  )
+
+```
+
+### Meta-Analysis Model For Agent
+
+## 3_Creation red_Agent
+
+```{r}
+
+
+co_coglobal_net <- co_coglobal %>%
+  filter(
+    !studyID %in% c(
+      "Yokoi, 2015b",
+      "Liu, 2025"
+    )
+  )
+
+
+mean_premean_coglobal <- mean(
+  co_coglobal_net$premean,
+  na.rm = TRUE
+)
+
+co_coglobal_net <- co_coglobal_net %>%
+  mutate(
+    premean_c = premean - mean_premean_coglobal
+  )
+
+
+co_coglobal_net %>%
+  summarise(
+    n_studies = n_distinct(studyID),
+    n_arms = n(),
+    n_agents = n_distinct(agent)
+  )
+
+co_coglobal_net %>%
+  group_by(agent) %>%
+  summarise(
+    n_arms = n(),
+    n_studies = n_distinct(studyID),
+    n_participants = sum(postn, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+net_agent_coglobal <- set_agd_arm(
+  co_coglobal_net,
+  study = studyID,
+  trt = agent,
+  y = y,
+  se = se,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+
+net_agent_coglobal
+
+
+plot(
+  net_agent_coglobal,
+  weight_edges = TRUE,
+  weight_nodes = TRUE
+)
+
+
+
+```
+
+## 4_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+fit_FE_coglobal <- nma(
+  net_agent_coglobal,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1)
+)
+
+fit_FE_coglobal
+
+```
+
+## 5_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_coglobal <- nma(
+  net_agent_coglobal,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_RE_coglobal
+
+```
+
+## 6_Model 3:Fixed-effect meta-analysis with covariate `premean`
+
+```{r}
+fit_FE_reg_coglobal <- nma(
+  net_agent_coglobal,
+  seed = 25062026,
+  trt_effects = "fixed",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  adapt_delta = 0.99
+)
+
+fit_FE_reg_coglobal
+
+```
+
+## 7_Model 4:Random-effects meta-analysis with covariate `premean`
+
+```{r}
+fit_RE_reg_coglobal <- nma(
+  net_agent_coglobal,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_RE_reg_coglobal
+
+```
+
+## 8_Model comparation
+
+```{r}
+dic_FE_coglobal <- dic(fit_FE_coglobal)
+dic_RE_coglobal <- dic(fit_RE_coglobal)
+dic_FE_reg_coglobal <- dic(fit_FE_reg_coglobal)
+dic_RE_reg_coglobal <- dic(fit_RE_reg_coglobal)
+
+dic_FE_coglobal
+dic_RE_coglobal
+dic_FE_reg_coglobal
+dic_RE_reg_coglobal
+
+
+model_comparison_coglobal <- tibble(
+  model = c(
+    "Fixed-effect",
+    "Random-effects",
+    "Fixed-effect + baseline cognition",
+    "Random-effects + baseline cognition"
+  ),
+
+  residual_deviance = c(
+    dic_FE_coglobal$resdev,
+    dic_RE_coglobal$resdev,
+    dic_FE_reg_coglobal$resdev,
+    dic_RE_reg_coglobal$resdev
+  ),
+
+  effective_parameters = c(
+    dic_FE_coglobal$pd,
+    dic_RE_coglobal$pd,
+    dic_FE_reg_coglobal$pd,
+    dic_RE_reg_coglobal$pd
+  ),
+
+  DIC = c(
+    dic_FE_coglobal$dic,
+    dic_RE_coglobal$dic,
+    dic_FE_reg_coglobal$dic,
+    dic_RE_reg_coglobal$dic
+  )
+) %>%
+  arrange(DIC) %>%
+  mutate(
+    delta_DIC = DIC - min(DIC)
+  )
+
+model_comparison_coglobal
+
+plot(dic_FE_coglobal)
+plot(dic_RE_coglobal)
+plot(dic_FE_reg_coglobal)
+plot(dic_RE_reg_coglobal)
+
+```
+
+
+## 10_model choose
+
+```{r}
+fit_main_coglobal <- fit_RE_reg_coglobal
+dic_main_coglobal <- dic_RE_reg_coglobal
+```
+
+
+## 11_relative effects
+
+```{r}
+baseline_summary_coglobal <- co_coglobal_net %>%
+  summarise(
+    min_premean = min(premean, na.rm = TRUE),
+    mean_premean = mean(premean, na.rm = TRUE),
+    median_premean = median(premean, na.rm = TRUE),
+    max_premean = max(premean, na.rm = TRUE),
+
+    min_premean_c = min(premean_c, na.rm = TRUE),
+    mean_premean_c = mean(premean_c, na.rm = TRUE),
+    median_premean_c = median(premean_c, na.rm = TRUE),
+    max_premean_c = max(premean_c, na.rm = TRUE)
+  )
+
+baseline_summary_coglobal
+
+
+
+rel_effect_coglobal <- relative_effects(
+  fit_main_coglobal,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline global cognition",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rel_effect_coglobal
+
+plot(
+  rel_effect_coglobal,
+  ref_line = 0,
+  stat = "halfeye"
+)
+
+```
+
+
+## 12_general Ranking
+
+```{r}
+rank_coglobal <- posterior_ranks(
+  fit_main_coglobal,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline global cognition",
+    premean_c = 0
+  ),
+  study = studyID
+)
+
+rank_coglobal
+
+plot(rank_coglobal)
+
+
+```
+
+
+
+## 15_rank probabilities
+
+```{r}
+rank_probs_cum_coglobal <- posterior_rank_probs(
+  fit_main_coglobal,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline global cognition",
+    premean_c = 0
+  ),
+  study = studyID,
+  cumulative = TRUE
+)
+
+rank_probs_cum_coglobal
+
+plot(rank_probs_cum_coglobal)
+
+```
+
+
+
+## 17_Checking for inconsistency
+
+```{r}
+fit_UME_RE_reg_coglobal <- nma(
+  net_agent_coglobal,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean_c,
+  consistency = "ume",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_reg_coglobal
+summary(fit_UME_RE_reg_coglobal)
+
+dic_UME_RE_reg_coglobal <- dic(
+  fit_UME_RE_reg_coglobal
+)
+
+dic_main_coglobal
+dic_UME_RE_reg_coglobal
+
+inconsistency_comparison_coglobal <- tibble(
+  model = c(
+    "Consistency: random-effects + baseline cognition",
+    "UME: random-effects + baseline cognition"
+  ),
+  residual_deviance = c(
+    dic_main_coglobal$resdev,
+    dic_UME_RE_reg_coglobal$resdev
+  ),
+  pD = c(
+    dic_main_coglobal$pd,
+    dic_UME_RE_reg_coglobal$pd
+  ),
+  DIC = c(
+    dic_main_coglobal$dic,
+    dic_UME_RE_reg_coglobal$dic
+  )
+) %>%
+  mutate(
+    delta_DIC = DIC - min(DIC)
+  )
+
+inconsistency_comparison_coglobal
+
+plot(
+  dic_main_coglobal,
+  dic_UME_RE_reg_coglobal,
+  show_uncertainty = FALSE
+)
+```
+
+
+
+## 20_posterior predictive distribution
+
+```{r}
+
+
+rel_effect_pred_coglobal <- relative_effects(
+  fit_main_coglobal,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline global cognition",
+    premean_c = 0
+  ),
+  study = studyID,
+  predictive_distribution = TRUE
+)
+
+rel_effect_pred_coglobal
+
+prob_harm_coglobal <- colMeans(
+  as.matrix(rel_effect_pred_coglobal) < 0
+)
+
+prob_harm_coglobal
+
+```
+
+
+
+### dose response overall 
+
+## 39_checking data
+
+```{r}
+co_coglobal %>%
+  summarise(
+    n_rows = n(),
+    missing_weekly_dose = sum(is.na(weekly_dose)),
+    missing_y = sum(is.na(y)),
+    min_dose = min(weekly_dose, na.rm = TRUE),
+    median_dose = median(weekly_dose, na.rm = TRUE),
+    mean_dose = mean(weekly_dose, na.rm = TRUE),
+    max_dose = max(weekly_dose, na.rm = TRUE),
+    n_unique_dose = n_distinct(weekly_dose)
+  )
+
+co_coglobal %>%
+  count(agent, is.na(weekly_dose))
+
+co_coglobal %>%
+  count(trt, is.na(weekly_dose))
+
+```
+
+## 40_exploratory graph overall
+
+```{r}
+
+
+library(ggplot2)
+library(gridExtra)
+library(splines)
+
+
+
+co_coglobal_dose_complete <- co_coglobal %>%
+  filter(
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+co_coglobal_dose_complete %>%
+  summarise(
+    n_arms = n(),
+    n_studies = n_distinct(studyID),
+    min_dose = min(weekly_dose, na.rm = TRUE),
+    median_dose = median(weekly_dose, na.rm = TRUE),
+    mean_dose = mean(weekly_dose, na.rm = TRUE),
+    max_dose = max(weekly_dose, na.rm = TRUE),
+    n_unique_dose = n_distinct(weekly_dose)
+  )
+
+co_coglobal_dose_complete %>%
+  count(agent, sort = TRUE)
+
+if (!all(c("weekly_dose", "y") %in% names(co_coglobal_dose_complete))) {
+  stop("The dataset does not contain the required variables: 'weekly_dose' and 'y'.")
+}
+
+co_coglobal_dose_plot <- co_coglobal_dose_complete %>%
+  filter(
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+## Linear model
+
+lin_plot_coglobal <- ggplot(
+  co_coglobal_dose_plot,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "lm", colour = "blue") +
+  labs(
+    x = "Weekly physical activity dose",
+    y = "Global cognition effect",
+    title = "Linear model"
+  ) +
+  theme_minimal()
+
+
+## LOESS
+
+loess_plot_coglobal <- ggplot(
+  co_coglobal_dose_plot,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_point(alpha = 0.7) +
+  geom_smooth(method = "loess", colour = "darkorange") +
+  labs(
+    x = "Weekly physical activity dose",
+    y = "Global cognition effect",
+    title = "LOESS"
+  ) +
+  theme_minimal()
+
+
+## Natural spline (2 df)
+
+spline2_plot_coglobal <- ggplot(
+  co_coglobal_dose_plot,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_point(alpha = 0.7) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ ns(x, 2),
+    colour = "forestgreen"
+  ) +
+  labs(
+    x = "Weekly physical activity dose",
+    y = "Global cognition effect",
+    title = "Natural spline (2 df)"
+  ) +
+  theme_minimal()
+
+
+## Natural spline (3 df)
+
+spline3_plot_coglobal <- ggplot(
+  co_coglobal_dose_plot,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(yintercept = 0, colour = "red") +
+  geom_point(alpha = 0.7) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ ns(x, 3),
+    colour = "black"
+  ) +
+  labs(
+    x = "Weekly physical activity dose",
+    y = "Global cognition effect",
+    title = "Natural spline (3 df)"
+  ) +
+  theme_minimal()
+
+
+grid.arrange(
+  lin_plot_coglobal,
+  loess_plot_coglobal,
+  spline2_plot_coglobal,
+  spline3_plot_coglobal,
+  nrow = 2
+)
+
+```
+
+## 41_statistical comprobation overall
+
+```{r}
+
+
+lm_simple_coglobal <-
+  lm(
+    y ~ weekly_dose,
+    data = co_coglobal_dose_plot
+  )
+
+summary(lm_simple_coglobal)
+
+
+lm_spline2_coglobal <-
+  lm(
+    y ~ ns(weekly_dose, 2),
+    data = co_coglobal_dose_plot
+  )
+
+anova(
+  lm_simple_coglobal,
+  lm_spline2_coglobal
+)
+
+
+lm_spline3_coglobal <-
+  lm(
+    y ~ ns(weekly_dose, 3),
+    data = co_coglobal_dose_plot
+  )
+
+anova(
+  lm_simple_coglobal,
+  lm_spline3_coglobal
+)
+
+
+```
+
+## 42_categorical groups
+
+```{r}
+
+
+co_coglobal_dose_cat <- co_coglobal_dose_complete %>%
+  filter(
+    !is.na(weekly_dose),
+    !is.na(y)
+  ) %>%
+  mutate(
+    dose_group = cut(
+      weekly_dose,
+      breaks = c(-Inf, 0, 500, 1000, Inf),
+      labels = c(
+        "Usual Care",
+        "Low",
+        "Medium",
+        "High"
+      ),
+      right = TRUE,
+      include.lowest = TRUE
+    ),
+    dose_group = factor(
+      dose_group,
+      levels = c(
+        "Usual Care",
+        "Low",
+        "Medium",
+        "High"
+      )
+    )
+  )
+
+
+## Number of arms per category
+
+co_coglobal_dose_cat %>%
+  count(
+    dose_group,
+    name = "n_arms"
+  )
+
+
+## Descriptive summary per category
+
+dose_group_summary_coglobal <- co_coglobal_dose_cat %>%
+  group_by(dose_group) %>%
+  summarise(
+    n_arms = n(),
+    n_studies = n_distinct(studyID),
+    min_dose = min(weekly_dose),
+    median_dose = median(weekly_dose),
+    mean_dose = mean(weekly_dose),
+    max_dose = max(weekly_dose),
+    mean_effect = mean(y),
+    sd_effect = sd(y),
+    .groups = "drop"
+  )
+
+dose_group_summary_coglobal
+
+
+## One-way ANOVA
+
+lm_cat_coglobal <- aov(
+  y ~ dose_group,
+  data = co_coglobal_dose_cat
+)
+
+summary(lm_cat_coglobal)
+
+
+## Tukey pairwise comparisons
+
+tukey_coglobal <- TukeyHSD(
+  lm_cat_coglobal,
+  "dose_group"
+)
+
+tukey_coglobal
+
+
+## Exploratory plot
+
+ggplot(
+  co_coglobal_dose_cat,
+  aes(
+    x = dose_group,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red"
+  ) +
+  geom_boxplot(
+    outlier.shape = NA
+  ) +
+  geom_jitter(
+    width = 0.12,
+    alpha = 0.7
+  ) +
+  labs(
+    x = "Weekly physical activity dose group",
+    y = "Global cognition effect",
+    title = "Global cognition by weekly dose category"
+  ) +
+  theme_minimal()
+
+```
+
+## 43_dose optimal overall para cognition
+
+```{r}
+
+
+
+co_coglobal_dose_linear <- co_coglobal_dose_complete %>%
+  filter(
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+
+
+lm_linear_coglobal <- lm(
+  y ~ weekly_dose,
+  data = co_coglobal_dose_linear
+)
+
+summary(lm_linear_coglobal)
+
+
+
+doses_coglobal <- seq(
+  from = min(
+    co_coglobal_dose_linear$weekly_dose,
+    na.rm = TRUE
+  ),
+  to = max(
+    co_coglobal_dose_linear$weekly_dose,
+    na.rm = TRUE
+  ),
+  length.out = 1000
+)
+
+
+
+pred_matrix_coglobal <- predict(
+  lm_linear_coglobal,
+  newdata = data.frame(
+    weekly_dose = doses_coglobal
+  ),
+  interval = "confidence",
+  level = 0.95
+)
+
+
+pred_df_coglobal <- data.frame(
+  weekly_dose = doses_coglobal,
+  predicted = pred_matrix_coglobal[, "fit"],
+  lower = pred_matrix_coglobal[, "lwr"],
+  upper = pred_matrix_coglobal[, "upr"]
+)
+
+
+optimal_index_coglobal <- which.max(
+  pred_df_coglobal$predicted
+)
+
+highest_dose_coglobal <-
+  pred_df_coglobal$weekly_dose[
+    optimal_index_coglobal
+  ]
+
+highest_response_coglobal <-
+  pred_df_coglobal$predicted[
+    optimal_index_coglobal
+  ]
+
+highest_response_lower_coglobal <-
+  pred_df_coglobal$lower[
+    optimal_index_coglobal
+  ]
+
+highest_response_upper_coglobal <-
+  pred_df_coglobal$upper[
+    optimal_index_coglobal
+  ]
+
+
+cat(
+  "Highest evaluated dose:",
+  round(highest_dose_coglobal, 1),
+  "\n"
+)
+
+cat(
+  "Predicted global cognition effect:",
+  round(highest_response_coglobal, 3),
+  "\n"
+)
+
+cat(
+  "95% confidence interval:",
+  round(highest_response_lower_coglobal, 3),
+  "to",
+  round(highest_response_upper_coglobal, 3),
+  "\n"
+)
+
+```
+
+## 44_optimal dose graph overall
+
+```{r}
+
+
+ggplot(
+  co_coglobal_dose_linear,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red"
+  ) +
+  geom_point(
+    alpha = 0.65
+  ) +
+  geom_ribbon(
+    data = pred_df_coglobal,
+    aes(
+      x = weekly_dose,
+      ymin = lower,
+      ymax = upper
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.2
+  ) +
+  geom_line(
+    data = pred_df_coglobal,
+    aes(
+      x = weekly_dose,
+      y = predicted
+    ),
+    inherit.aes = FALSE,
+    colour = "blue",
+    linewidth = 1
+  ) +
+  geom_vline(
+    xintercept = highest_dose_coglobal,
+    linetype = "dashed",
+    colour = "red"
+  ) +
+  annotate(
+    geom = "text",
+    x = highest_dose_coglobal,
+    y = highest_response_coglobal,
+    label = paste0(
+      "Highest evaluated dose: ",
+      round(highest_dose_coglobal, 0)
+    ),
+    hjust = 1.05,
+    vjust = -0.7,
+    colour = "red"
+  ) +
+  labs(
+    x = "Weekly physical activity dose",
+    y = "Global cognition effect",
+    title = paste0(
+      "Linear dose-response relationship ",
+      "for global cognition"
+    ),
+    subtitle = paste0(
+      "The highest predicted response occurs ",
+      "at the upper boundary of the observed dose range"
+    )
+  ) +
+  theme_minimal()
+
+
+```
+
+## 44.1_dose response exploratoria de spline
+
+```{r}
+
+
+
+library(dplyr)
+library(ggplot2)
+library(splines)
+
+
+
+co_coglobal_dose_spline <- co_coglobal_dose_complete %>%
+  filter(
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+
+
+lm_spline2_coglobal <- lm(
+  y ~ ns(weekly_dose, df = 2),
+  data = co_coglobal_dose_spline
+)
+
+summary(lm_spline2_coglobal)
+
+
+
+anova(
+  lm_linear_coglobal,
+  lm_spline2_coglobal
+)
+
+
+
+doses_spline_coglobal <- seq(
+  from = min(
+    co_coglobal_dose_spline$weekly_dose,
+    na.rm = TRUE
+  ),
+  to = max(
+    co_coglobal_dose_spline$weekly_dose,
+    na.rm = TRUE
+  ),
+  length.out = 1000
+)
+
+
+
+pred_spline_matrix_coglobal <- predict(
+  lm_spline2_coglobal,
+  newdata = data.frame(
+    weekly_dose = doses_spline_coglobal
+  ),
+  interval = "confidence",
+  level = 0.95
+)
+
+
+pred_spline_df_coglobal <- data.frame(
+  weekly_dose = doses_spline_coglobal,
+  predicted = pred_spline_matrix_coglobal[, "fit"],
+  lower = pred_spline_matrix_coglobal[, "lwr"],
+  upper = pred_spline_matrix_coglobal[, "upr"]
+)
+
+
+
+optimal_index_spline_coglobal <- which.max(
+  pred_spline_df_coglobal$predicted
+)
+
+optimal_dose_spline_coglobal <-
+  pred_spline_df_coglobal$weekly_dose[
+    optimal_index_spline_coglobal
+  ]
+
+optimal_response_spline_coglobal <-
+  pred_spline_df_coglobal$predicted[
+    optimal_index_spline_coglobal
+  ]
+
+optimal_lower_spline_coglobal <-
+  pred_spline_df_coglobal$lower[
+    optimal_index_spline_coglobal
+  ]
+
+optimal_upper_spline_coglobal <-
+  pred_spline_df_coglobal$upper[
+    optimal_index_spline_coglobal
+  ]
+
+
+
+cat(
+  "Exploratory spline dose with the highest predicted response:",
+  round(optimal_dose_spline_coglobal, 1),
+  "\n"
+)
+
+cat(
+  "Predicted global cognition effect:",
+  round(optimal_response_spline_coglobal, 3),
+  "\n"
+)
+
+cat(
+  "95% confidence interval:",
+  round(optimal_lower_spline_coglobal, 3),
+  "to",
+  round(optimal_upper_spline_coglobal, 3),
+  "\n"
+)
+
+
+spline_optimal_plot_coglobal <- ggplot(
+  co_coglobal_dose_spline,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red",
+    linewidth = 0.6
+  ) +
+  geom_point(
+    alpha = 0.65
+  ) +
+  geom_ribbon(
+    data = pred_spline_df_coglobal,
+    aes(
+      x = weekly_dose,
+      ymin = lower,
+      ymax = upper
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.20
+  ) +
+  geom_line(
+    data = pred_spline_df_coglobal,
+    aes(
+      x = weekly_dose,
+      y = predicted
+    ),
+    inherit.aes = FALSE,
+    colour = "blue",
+    linewidth = 1
+  ) +
+  geom_vline(
+    xintercept = optimal_dose_spline_coglobal,
+    linetype = "dashed",
+    colour = "red",
+    linewidth = 0.7
+  ) +
+  geom_point(
+    data = data.frame(
+      weekly_dose = optimal_dose_spline_coglobal,
+      predicted = optimal_response_spline_coglobal
+    ),
+    aes(
+      x = weekly_dose,
+      y = predicted
+    ),
+    inherit.aes = FALSE,
+    colour = "red",
+    size = 3
+  ) +
+  annotate(
+    "text",
+    x = optimal_dose_spline_coglobal,
+    y = optimal_response_spline_coglobal,
+    label = paste0(
+      "Highest predicted response\n",
+      round(optimal_dose_spline_coglobal, 0),
+      " dose units/week"
+    ),
+    hjust = 1.05,
+    vjust = -0.8,
+    colour = "red"
+  ) +
+  labs(
+    x = "Weekly physical activity dose",
+    y = "Global cognition effect",
+    title = "Exploratory nonlinear dose–response relationship",
+    subtitle = "Natural spline with 2 degrees of freedom"
+  ) +
+  theme_minimal()
+
+spline_optimal_plot_coglobal
+
+pred_linear_comparison_coglobal <- pred_df_coglobal %>%
+  transmute(
+    weekly_dose,
+    predicted,
+    model = "Linear model"
+  )
+
+pred_spline_comparison_coglobal <- pred_spline_df_coglobal %>%
+  transmute(
+    weekly_dose,
+    predicted,
+    model = "Natural spline (2 df)"
+  )
+
+pred_models_coglobal <- bind_rows(
+  pred_linear_comparison_coglobal,
+  pred_spline_comparison_coglobal
+)
+
+
+ggplot(
+  co_coglobal_dose_spline,
+  aes(
+    x = weekly_dose,
+    y = y
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red",
+    linewidth = 0.5
+  ) +
+  geom_point(
+    alpha = 0.55
+  ) +
+  geom_line(
+    data = pred_models_coglobal,
+    aes(
+      x = weekly_dose,
+      y = predicted,
+      linetype = model
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  labs(
+    x = "Weekly physical activity dose",
+    y = "Global cognition effect",
+    title = "Linear and exploratory nonlinear dose–response models",
+    linetype = "Model"
+  ) +
+  theme_minimal()
+```
+
+
+## FALL
+### FALL RISK # Lower is better = FALSE
+
+## 1_filter domain 
+
+```{r} 
+caida <- data %>%
+  filter(
+    outcome == "fall",
+    scale %in% c("Berg", "Ti_total")
+  ) %>%
+  mutate(
+    across(
+      c(y, se, postn, premean, weekly_dose),
+      as.numeric
+    )
+  ) %>%
+  filter(
+    !is.na(y),
+    !is.na(se),
+    !is.na(postn)
+  )
+
+```
+
+
+## 2_Cheking networks and models
+
+```{r} 
+caida %>%
+  count(studyID, scale, agent, trt)
+
+caida %>%
+  summarise(
+    n_rows = n(),
+    n_studies = n_distinct(studyID),
+    n_scales = n_distinct(scale),
+    n_agents = n_distinct(agent),
+    missing_y = sum(is.na(y)),
+    missing_se = sum(is.na(se)),
+    missing_postn = sum(is.na(postn)),
+    missing_premean = sum(is.na(premean))
+  )
+
+unique(caida$scale)
+unique(caida$agent)
+unique(caida$trt)
+
+
+```
+
+### Meta-Analysis Model For Agent
+
+## 3_Creation net_Agent
+
+```{r}
+
+
+caida <- caida %>%
+  filter(studyID != "Kajbafvala, 2025")
+
+
+
+net_agent_caida <- set_agd_arm(
+  caida,
+  study = studyID,
+  trt = agent,
+  y = y,
+  se = se,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+net_agent_caida
+
+plot(
+  net_agent_caida,
+  weight_edges = TRUE,
+  weight_nodes = TRUE
+)
+
+
+
+
+```
+
+## 4_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+fit_FE_caida <- nma(
+  net_agent_caida,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1)
+)
+
+fit_FE_caida
+
+```
+
+## 5_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_caida <- nma(
+  net_agent_caida,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5)
+)
+
+fit_RE_caida
+
+```
+
+## 6_Model 3:Fixed-effect meta-analysis with covariate `premean`
+
+```{r}
+fit_FE_reg_caida <- nma(
+  net_agent_caida,
+  seed = 25062026,
+  trt_effects = "fixed",
+  regression = ~ .trt:premean,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  adapt_delta = 0.99
+)
+
+fit_FE_reg_caida
+
+```
+
+## 7_Model 4:Random-effects meta-analysis with covariate `premean`
+
+```{r}
+fit_RE_reg_caida <- nma(
+  net_agent_caida,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_RE_reg_caida
+
+```
+
+## 8_Model comparation
+
+```{r}
+dic_FE_caida <- dic(fit_FE_caida)
+dic_RE_caida <- dic(fit_RE_caida)
+dic_FE_reg_caida <- dic(fit_FE_reg_caida)
+dic_RE_reg_caida <- dic(fit_RE_reg_caida)
+
+model_comparison_caida <- tibble(
+  model = c(
+    "Fixed-effect",
+    "Random-effects",
+    "Fixed-effect + premean",
+    "Random-effects + premean"
+  ),
+  DIC = c(
+    dic_FE_caida$dic,
+    dic_RE_caida$dic,
+    dic_FE_reg_caida$dic,
+    dic_RE_reg_caida$dic
+  ),
+  residual_deviance = c(
+    dic_FE_caida$resdev,
+    dic_RE_caida$resdev,
+    dic_FE_reg_caida$resdev,
+    dic_RE_reg_caida$resdev
+  )
+)
+
+model_comparison_caida
+
+
+```
+
+## 9_check
+
+```{r}
+plot(dic_FE_caida)
+plot(dic_RE_caida)
+plot(dic_FE_reg_caida)
+plot(dic_RE_reg_caida)
+
+```
+
+
+## 10_model choose
+
+```{r}
+## Modelo principal
+
+fit_main_caida <- fit_RE_reg_caida
+dic_main_caida <- dic_RE_reg_caida
+
+```
+
+
+## 11_relative effects
+
+```{r}
+
+caida %>%
+  summarise(
+    min_premean = min(premean, na.rm = TRUE),
+    mean_premean = mean(premean, na.rm = TRUE),
+    median_premean = median(premean, na.rm = TRUE),
+    max_premean = max(premean, na.rm = TRUE)
+  )
+
+
+mean_premean_caida <- mean(caida$premean, na.rm = TRUE)
+
+rel_effect_caida <- relative_effects(
+  fit_main_caida,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline balance score",
+    premean = mean_premean_caida
+  ),
+  study = studyID
+)
+
+rel_effect_caida
+
+plot(
+  rel_effect_caida,
+  ref_line = 0,
+  stat = "halfeye"
+)
+
+
+
+summary(fit_main_caida) 
+rel_effect_caida
+```
+
+
+## 12_general Ranking
+
+```{r}
+rank_caida <- posterior_ranks(
+  fit_main_caida,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline balance score",
+    premean = mean_premean_caida
+  ),
+  study = studyID
+)
+
+rank_caida
+
+plot(rank_caida)
+```
+
+
+## 15_rank probabilities
+
+```{r}
+rank_probs_cum_caida <- posterior_rank_probs(
+  fit_main_caida,
+  lower_better = FALSE,
+  newdata = tibble(studyID = "Mean baseline gait speed",
+    premean = mean_premean_caida),
+study = studyID,
+  cumulative = TRUE
+)
+
+rank_probs_cum_caida
+plot(rank_probs_cum_caida)
+
+
+```
+
+
+## 17_Checking for inconsistency
+
+```{r}
+
+
+fit_UME_RE_reg_caida <- nma(
+  net_agent_caida,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean,
+  consistency = "ume",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_reg_caida
+summary(fit_UME_RE_reg_caida)
+
+
+dic_UME_RE_reg_caida <- dic(fit_UME_RE_reg_caida)
+
+dic_main_caida
+dic_UME_RE_reg_caida
+
+
+inconsistency_comparison_caida <- tibble(
+  model = c(
+    "Consistency: random-effects + premean",
+    "UME: random-effects + premean"
+  ),
+  DIC = c(
+    dic_main_caida$dic,
+    dic_UME_RE_reg_caida$dic
+  ),
+  residual_deviance = c(
+    dic_main_caida$resdev,
+    dic_UME_RE_reg_caida$resdev
+  )
+)
+
+inconsistency_comparison_caida
+
+plot(
+  dic_main_caida,
+  dic_UME_RE_reg_caida,
+  show_uncertainty = FALSE
+)
+
+```
+
+
+
+## 20_posterior predictive distribution
+
+```{r}
+
+
+rel_effect_pred_caida <- relative_effects(
+  fit_main_caida,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline balance score",
+    premean = mean_premean_caida
+  ),
+  study = studyID,
+  predictive_distribution = TRUE
+)
+
+rel_effect_pnet_caida
+
+prob_harm_caida <- colMeans(as.matrix(rel_effect_pred_caida) < 0)
+
+prob_harm_caida
+
+```
+
+
+### Meta-Analysis Model For Trt
+
+## 21_Creation red_Trt
+
+```{r}
+
+
+caida_trt <- caida %>%
+  mutate(
+    trt = case_when(
+      trt == "theraband" ~ "resistance training",
+      trt == "Tai Chi" ~ "mind body",
+      trt == "Yoga" ~ "mind body",
+      trt == "aerobic+resistance+stretching" ~ "aerobic+resistance",
+      trt == "wii" ~ "exergame",
+      trt == "virtual reality" ~ "exergame",
+      trt == "cycling" ~ "resistance training",
+      trt == "dance" ~ "mixed aerobic",
+      trt == "areobic+resistance" ~ "aerobic+resistance",
+      TRUE ~ trt
+    )
+  )
+
+net_trt <- set_agd_arm(
+  caida_trt,
+  study = studyID,
+  trt = trt,
+  y = y,
+  se = se,
+  sample_size = postn,
+  trt_ref = "usual care"
+)
+
+net_trt
+
+plot(
+  net_trt,
+  weight_edges = TRUE,
+  weight_nodes = TRUE
+)
+
+## Number of studies contributing to each treatment
+
+caida_trt %>%
+  distinct(studyID, trt) %>%
+  count(trt, name = "n_studies") %>%
+  arrange(desc(n_studies))
+
+```
+
+## 22_Model 1: Fixed-effect meta-analysis (no covariate)
+
+```{r}
+fit_FE_trt_caida <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "fixed",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1)
+)
+
+fit_FE_trt_caida
+
+```
+
+## 23_Model 2: Random-effects model (no covariate)
+
+```{r}
+
+fit_RE_trt_caida <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "random",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5)
+)
+
+fit_RE_trt_caida
+
+```
+
+## 24_Model 3:Fixed-effect meta-analysis with covariate `premean`
+
+```{r}
+fit_FE_reg_trt_caida <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "fixed",
+  regression = ~ .trt:premean,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  adapt_delta = 0.99
+)
+
+fit_FE_reg_trt_caida
+
+```
+
+## 25_Model 4:Random-effects meta-analysis with covariate `premean`
+
+```{r}
+fit_RE_reg_trt_caida <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean,
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_RE_reg_trt_caida
+
+```
+
+## 26_Model comparation
+
+```{r}
+dic_FE_trt_caida <- dic(fit_FE_trt_caida)
+dic_RE_trt_caida <- dic(fit_RE_trt_caida)
+dic_FE_reg_trt_caida <- dic(fit_FE_reg_trt_caida)
+dic_RE_reg_trt_caida <- dic(fit_RE_reg_trt_caida)
+
+dic_FE_trt_caida
+dic_RE_trt_caida
+dic_FE_reg_trt_caida
+dic_RE_reg_trt_caida
+
+
+model_comparison_trt_caida <- tibble(
+  model = c(
+    "Fixed-effect",
+    "Random-effects",
+    "Fixed-effect + premean",
+    "Random-effects + premean"
+  ),
+  DIC = c(
+    dic_FE_trt_caida$dic,
+    dic_RE_trt_caida$dic,
+    dic_FE_reg_trt_caida$dic,
+    dic_RE_reg_trt_caida$dic
+  ),
+  residual_deviance = c(
+    dic_FE_trt_caida$resdev,
+    dic_RE_trt_caida$resdev,
+    dic_FE_reg_trt_caida$resdev,
+    dic_RE_reg_trt_caida$resdev
+  )
+)
+
+model_comparison_trt_caida
+
+
+
+```
+
+
+## 28_model choose
+
+```{r}
+fit_main_trt_caida <- fit_RE_reg_trt_caida
+dic_main_trt_caida <- dic_RE_reg_trt_caida
+
+```
+
+
+## 29_relative effects
+
+```{r}
+mean_premean_trt_caida <- mean(
+  caida_trt$premean,
+  na.rm = TRUE
+)
+
+mean_premean_trt_caida
+
+rel_effect_trt_caida <- relative_effects(
+  fit_main_trt_caida,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline balance score",
+    premean = mean_premean_trt_caida
+  ),
+  study = studyID
+)
+
+rel_effect_trt_caida
+
+plot(
+  rel_effect_trt_caida,
+  ref_line = 0
+)
+
+summary(rel_effect_trt_caida)
+
+```
+
+
+## 30_general Ranking
+
+```{r}
+rank_trt_caida <- posterior_ranks(
+  fit_main_trt_caida,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline balance score",
+    premean = mean_premean_trt_caida
+  ),
+  study = studyID
+)
+
+rank_trt_caida
+plot(rank_trt_caida)
+
+```
+
+
+
+## 33_rank probabilities
+
+```{r}
+rank_probs_cum_trt_caida <- posterior_rank_probs(
+  fit_main_trt_caida,
+  lower_better = FALSE,
+  newdata = tibble(
+    studyID = "Mean baseline balance score",
+    premean = mean_premean_trt_caida
+  ),
+  study = studyID,
+  cumulative = TRUE
+)
+
+rank_probs_cum_trt_caida
+plot(rank_probs_cum_trt_caida)
+
+```
+
+
+## 35_Checking for inconsistency
+
+```{r}
+### 34_Assessment of inconsistency (UME model)
+
+fit_UME_RE_reg_trt_caida <- nma(
+  net_trt,
+  seed = 25062026,
+  trt_effects = "random",
+  regression = ~ .trt:premean,
+  consistency = "ume",
+  prior_intercept = normal(scale = 1),
+  prior_trt = normal(scale = 1),
+  prior_reg = normal(scale = 1),
+  prior_het = half_normal(scale = 0.5),
+  adapt_delta = 0.99
+)
+
+fit_UME_RE_reg_trt_caida
+summary(fit_UME_RE_reg_trt_caida)
+
+## Calculate DIC for the UME model
+
+dic_UME_RE_reg_trt_caida <- dic(fit_UME_RE_reg_trt_caida)
+
+dic_main_trt_caida
+dic_UME_RE_reg_trt_caida
+
+## Compare consistency and UME models
+
+inconsistency_comparison_trt_caida <- tibble(
+  model = c(
+    "Consistency: random-effects + premean",
+    "UME: random-effects + premean"
+  ),
+  DIC = c(
+    dic_main_trt_caida$dic,
+    dic_UME_RE_reg_trt_caida$dic
+  ),
+  residual_deviance = c(
+    dic_main_trt_caida$resdev,
+    dic_UME_RE_reg_trt_caida$resdev
+  )
+)
+
+inconsistency_comparison_trt_caida
+
+plot(
+  dic_main_trt_caida,
+  dic_UME_RE_reg_trt_caida,
+  show_uncertainty = FALSE
+)
+
+```
+
+
+## 38_posterior predictive distribution
+
+```{r}
+
+
+rel_effect_pred_trt_caida <- relative_effects(
+  fit_main_trt_caida,
+  trt_ref = "usual care",
+  newdata = tibble(
+    studyID = "Mean baseline balance score",
+    premean = mean_premean_trt_caida
+  ),
+  study = studyID,
+  predictive_distribution = TRUE
+)
+
+rel_effect_pred_trt_caida
+
+prob_harm_trt_caida <- colMeans(
+  as.matrix(rel_effect_pred_trt_caida) < 0
+)
+
+sort(prob_harm_trt_caida)
+
+
+```
+
+### dose response overall 
+
+## 39_checking data
+
+```{r}
+
+
+caida %>%
+  summarise(
+    n_rows = n(),
+    missing_weekly_dose = sum(is.na(weekly_dose)),
+    missing_y = sum(is.na(y)),
+    min_dose = min(weekly_dose, na.rm = TRUE),
+    median_dose = median(weekly_dose, na.rm = TRUE),
+    mean_dose = mean(weekly_dose, na.rm = TRUE),
+    max_dose = max(weekly_dose, na.rm = TRUE),
+    n_unique_dose = n_distinct(weekly_dose, na.rm = TRUE)
+  )
+
+## Missing weekly dose by agent
+
+caida %>%
+  count(
+    agent,
+    missing_weekly_dose = is.na(weekly_dose),
+    name = "n_arms"
+  ) %>%
+  arrange(agent, missing_weekly_dose)
+
+## Missing weekly dose by grouped treatment
+
+caida_trt %>%
+  count(
+    trt,
+    missing_weekly_dose = is.na(weekly_dose),
+    name = "n_arms"
+  ) %>%
+  arrange(trt, missing_weekly_dose)
+
+
+```
+
+## 40_exploratory graph overall
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(splines)
+library(gridExtra)
+
+if (!all(c("weekly_dose", "y") %in% names(caida))) {
+  stop(
+    "La tabla `caida` no tiene las columnas necesarias: ",
+    "'weekly_dose' y 'y'"
+  )
+}
+
+caida_dose <- caida %>%
+  filter(
+    !is.na(weekly_dose),
+    !is.na(y)
+  )
+
+dose_limits_caida <- quantile(
+  caida_dose$weekly_dose,
+  probs = c(0.05, 0.95),
+  na.rm = TRUE
+)
+
+base_plot_caida <- ggplot(
+  caida_dose,
+  aes(x = weekly_dose, y = y)
+) +
+  geom_hline(
+    yintercept = 0,
+    colour = "red",
+    linewidth = 0.6
+  ) +
+  geom_vline(
+    xintercept = dose_limits_caida,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_point(alpha = 0.75) +
+  geom_rug(
+    sides = "b",
+    alpha = 0.35
+  ) +
+  labs(
+    x = "Weekly physical activity dose (min/week)",
+    y = "Change in balance performance"
+  ) +
+  theme_minimal()
+
+lin_plot_caida <- base_plot_caida +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = TRUE
+  ) +
+  labs(title = "Linear regression")
+
+loess_plot_caida <- base_plot_caida +
+  geom_smooth(
+    method = "loess",
+    formula = y ~ x,
+    se = TRUE,
+    span = 0.75
+  ) +
+  labs(title = "LOESS")
+
+spline2_plot_caida <- base_plot_caida +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ ns(x, df = 2),
+    se = TRUE
+  ) +
+  labs(title = "Natural spline (2 df)")
+
+spline3_plot_caida <- base_plot_caida +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ ns(x, df = 3),
+    se = TRUE
+  ) +
+  labs(title = "Natural spline (3 df)")
+
+grid.arrange(
+  lin_plot_caida,
+  loess_plot_caida,
+  spline2_plot_caida,
+  spline3_plot_caida,
+  nrow = 2
+)
+```
+
+## 41_statistical comprobation overall
+
+```{r}
+lm_simple_caida <- lm(
+  y ~ weekly_dose,
+  data = caida_dose
+)
+
+lm_spline2_caida <- lm(
+  y ~ ns(weekly_dose, df = 2),
+  data = caida_dose
+)
+
+lm_spline3_caida <- lm(
+  y ~ ns(weekly_dose, df = 3),
+  data = caida_dose
+)
+
+summary(lm_simple_caida)
+summary(lm_spline2_caida)
+summary(lm_spline3_caida)
+
+anova(lm_simple_caida, lm_spline2_caida)
+anova(lm_simple_caida, lm_spline3_caida)
+
+anova(lm_spline2_caida, lm_spline3_caida)
+
+model_fit_caida <- tibble(
+  model = c(
+    "Linear",
+    "Natural spline, 2 df",
+    "Natural spline, 3 df"
+  ),
+  parameters = c(
+    length(coef(lm_simple_caida)),
+    length(coef(lm_spline2_caida)),
+    length(coef(lm_spline3_caida))
+  ),
+  RSS = c(
+    deviance(lm_simple_caida),
+    deviance(lm_spline2_caida),
+    deviance(lm_spline3_caida)
+  ),
+  R2 = c(
+    summary(lm_simple_caida)$r.squared,
+    summary(lm_spline2_caida)$r.squared,
+    summary(lm_spline3_caida)$r.squared
+  ),
+  adjusted_R2 = c(
+    summary(lm_simple_caida)$adj.r.squared,
+    summary(lm_spline2_caida)$adj.r.squared,
+    summary(lm_spline3_caida)$adj.r.squared
+  ),
+  AIC = c(
+    AIC(lm_simple_caida),
+    AIC(lm_spline2_caida),
+    AIC(lm_spline3_caida)
+  ),
+  BIC = c(
+    BIC(lm_simple_caida),
+    BIC(lm_spline2_caida),
+    BIC(lm_spline3_caida)
+  )
+) %>%
+  mutate(
+    delta_AIC = AIC - min(AIC),
+    delta_BIC = BIC - min(BIC)
+  ) %>%
+  arrange(AIC)
+
+model_fit_caida
+
+```
+
+
+## 43_dose optimal overall para caida
+
+```{r}
+
+## 43_Estimated peak dose (exploratory)
+
+lm_spline2_caida <- lm(
+  y ~ ns(weekly_dose, df = 2),
+  data = caida_dose
+)
+
+dose_grid_caida <- tibble(
+  weekly_dose = seq(
+    min(caida_dose$weekly_dose),
+    max(caida_dose$weekly_dose),
+    length.out = 1000
+  )
+)
+
+dose_grid_caida$predicted <- predict(
+  lm_spline2_caida,
+  newdata = dose_grid_caida
+)
+
+peak_index_caida <- which.max(dose_grid_caida$predicted)
+
+peak_dose_caida <- dose_grid_caida$weekly_dose[peak_index_caida]
+peak_response_caida <- dose_grid_caida$predicted[peak_index_caida]
+
+cat(
+  "Estimated peak dose:",
+  round(peak_dose_caida, 1),
+  "METs/week\n"
+)
+
+cat(
+  "Maximum predicted response:",
+  round(peak_response_caida, 3),
+  "\n"
+)
+```
+
+## 44_optimal dose graph overall
+
+```{r}
+ggplot(
+  caida_dose,
+  aes(
+    weekly_dose,
+    y
+  )
+) +
+
+  geom_point(alpha = 0.65) +
+
+  geom_line(
+    data = dose_grid_caida,
+    aes(
+      weekly_dose,
+      predicted
+    ),
+    colour = "blue",
+    linewidth = 1.2
+  ) +
+
+  geom_vline(
+    xintercept = peak_dose_caida,
+    colour = "red",
+    linetype = "dashed"
+  ) +
+
+  geom_point(
+    aes(
+      peak_dose_caida,
+      peak_response_caida
+    ),
+    colour = "red",
+    size = 3
+  ) +
+
+  annotate(
+    "text",
+    x = peak_dose_caida,
+    y = peak_response_caida,
+    label = paste0(
+      "Peak dose\n",
+      round(peak_dose_caida),
+      " METs/week"
+    ),
+    hjust = -0.05,
+    vjust = -0.8,
+    colour = "red"
+  ) +
+
+  labs(
+    x = "Weekly physical activity dose (METs/week)",
+    y = "Change in balance performance",
+    title = "Exploratory dose-response curve"
+  ) +
+
+  theme_minimal()
+```
+
+### dose response Agent
+
+## 45_dose response por agent
+
+```{r}
+library(splines)
+library(dplyr)
+library(broom)
+
+caida_dose_agent <- caida_dose %>%
+  filter(agent != "usual care")
+
+agent_split_caida <- split(
+  caida_dose_agent,
+  caida_dose_agent$agent
+)
+
+results_agent_caida <- list()
+
+for (nombre_agent in names(agent_split_caida)) {
+
+  datos <- agent_split_caida[[nombre_agent]]
+
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) {
+    next
+  }
+
+  modelo_lin <- lm(y ~ weekly_dose, data = datos)
+  modelo_ns2 <- lm(y ~ ns(weekly_dose, df = 2), data = datos)
+  modelo_ns3 <- lm(y ~ ns(weekly_dose, df = 3), data = datos)
+
+  comp12 <- anova(modelo_lin, modelo_ns2)
+  comp13 <- anova(modelo_lin, modelo_ns3)
+  comp23 <- anova(modelo_ns2, modelo_ns3)
+
+  results_agent_caida[[nombre_agent]] <-
+    tibble(
+      agent = nombre_agent,
+      n = nrow(datos),
+
+      p_linear = summary(modelo_lin)$coefficients[2,4],
+
+      p_linear_vs_ns2 = comp12$`Pr(>F)`[2],
+      p_linear_vs_ns3 = comp13$`Pr(>F)`[2],
+      p_ns2_vs_ns3    = comp23$`Pr(>F)`[2],
+
+      AIC_linear = AIC(modelo_lin),
+      AIC_ns2    = AIC(modelo_ns2),
+      AIC_ns3    = AIC(modelo_ns3),
+
+      adjR2_linear = summary(modelo_lin)$adj.r.squared,
+      adjR2_ns2    = summary(modelo_ns2)$adj.r.squared,
+      adjR2_ns3    = summary(modelo_ns3)$adj.r.squared
+    )
+}
+
+results_agent_caida <-
+  bind_rows(results_agent_caida) %>%
+  arrange(p_linear_vs_ns2)
+
+results_agent_caida
+
+
+```
+
+## 46_optimal dose agent
+
+```{r}
+optima_agent_caida <- map(agent_split_caida, function(datos) {
+  
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) return(NULL)
+  
+  modelo <- lm(y ~ ns(weekly_dose, 2), data = datos)
+  
+  dose_seq <- seq(
+    min(datos$weekly_dose, na.rm = TRUE),
+    max(datos$weekly_dose, na.rm = TRUE),
+    length.out = 1000
+  )
+  
+  predicciones <- predict(
+    modelo,
+    newdata = data.frame(weekly_dose = dose_seq)
+  )
+  
+  opt_index <- which.max(predicciones)
+  opt_dose <- dose_seq[opt_index]
+  opt_resp <- predicciones[opt_index]
+  
+  tibble(
+    agent = unique(datos$agent),
+    n = nrow(datos),
+    n_unique_dose = n_distinct(datos$weekly_dose),
+    optimal_dose = round(opt_dose, 1),
+    predicted_change = round(opt_resp, 3)
+  )
+})
+
+optima_agent_caida_tbl <- bind_rows(optima_agent_caida)
+
+optima_agent_caida_tbl
+
+```
+
+### dose response Agent Multicomponent y Resistance
+
+```{r}
+library(purrr)
+library(dplyr)
+library(splines)
+
+optima_agent_caida <- map(agent_split_caida, function(datos){
+
+  if (nrow(datos) < 5 || n_distinct(datos$weekly_dose) < 4)
+    return(NULL)
+
+  agent_name <- unique(datos$agent)
+
+  if(agent_name == "multicomponent"){
+    modelo <- lm(y ~ ns(weekly_dose, df = 3), data = datos)
+    spline_df <- 3
+  } else if(agent_name == "resistance"){
+    modelo <- lm(y ~ ns(weekly_dose, df = 2), data = datos)
+    spline_df <- 2
+  } else{
+    return(NULL)
+  }
+
+  dose_seq <- seq(
+    min(datos$weekly_dose),
+    max(datos$weekly_dose),
+    length.out = 1000
+  )
+
+  pred_df <- tibble(
+    weekly_dose = dose_seq,
+    predicted = predict(
+      modelo,
+      newdata = tibble(weekly_dose = dose_seq)
+    )
+  )
+
+  peak_index <- which.max(pred_df$predicted)
+
+  tibble(
+    agent = agent_name,
+    spline = spline_df,
+    n = nrow(datos),
+    n_unique_dose = n_distinct(datos$weekly_dose),
+    peak_dose = round(pred_df$weekly_dose[peak_index],1),
+    predicted_change = round(pred_df$predicted[peak_index],3)
+  )
+
+})
+
+optima_agent_caida_tbl <-
+  bind_rows(optima_agent_caida)
+
+optima_agent_caida_tbl
+
+
+```
+
+### graph Resistance y Multicomponent
+
+```{r}
+
+
+datos_res <- filter(caida_dose_agent, agent == "resistance")
+
+modelo_res <- lm(
+  y ~ ns(weekly_dose, df = 2),
+  data = datos_res
+)
+
+dose_grid_res <- tibble(
+  weekly_dose = seq(
+    min(datos_res$weekly_dose),
+    max(datos_res$weekly_dose),
+    length.out = 1000
+  )
+)
+
+dose_grid_res$predicted <-
+  predict(modelo_res, newdata = dose_grid_res)
+
+peak_res <-
+  dose_grid_res %>%
+  slice_max(predicted, n = 1)
+
+ggplot(datos_res,
+       aes(weekly_dose, y)) +
+
+  geom_point(size = 2, alpha = .7) +
+
+  geom_line(
+    data = dose_grid_res,
+    aes(y = predicted),
+    colour = "blue",
+    linewidth = 1.2
+  ) +
+
+  geom_vline(
+    xintercept = peak_res$weekly_dose,
+    colour = "red",
+    linetype = 2
+  ) +
+
+  geom_point(
+    data = peak_res,
+    aes(y = predicted),
+    colour = "red",
+    size = 3
+  ) +
+
+  annotate(
+    "text",
+    x = peak_res$weekly_dose,
+    y = peak_res$predicted,
+    label = paste0(round(peak_res$weekly_dose,1)," METs/week"),
+    colour = "red",
+    hjust = -0.05,
+    vjust = -0.8
+  ) +
+
+  labs(
+    title = "Resistance training",
+    x = "Weekly physical activity dose (METs/week)",
+    y = "Change in balance performance"
+  ) +
+
+  theme_minimal()
+
+
+
+datos_multi <- filter(
+  caida_dose_agent,
+  agent == "multicomponent"
+)
+
+modelo_multi <- lm(
+  y ~ ns(weekly_dose, df = 3),
+  data = datos_multi
+)
+
+dose_grid_multi <- tibble(
+  weekly_dose = seq(
+    min(datos_multi$weekly_dose),
+    max(datos_multi$weekly_dose),
+    length.out = 1000
+  )
+)
+
+dose_grid_multi$predicted <- predict(
+  modelo_multi,
+  newdata = dose_grid_multi
+)
+
+peak_multi <- dose_grid_multi %>%
+  slice_max(predicted, n = 1)
+
+ggplot(
+  datos_multi,
+  aes(weekly_dose, y)
+) +
+
+  geom_point(
+    size = 2,
+    alpha = 0.7
+  ) +
+
+  geom_line(
+    data = dose_grid_multi,
+    aes(y = predicted),
+    colour = "blue",
+    linewidth = 1.2
+  ) +
+
+  geom_vline(
+    xintercept = peak_multi$weekly_dose,
+    colour = "red",
+    linetype = "dashed"
+  ) +
+
+  geom_point(
+    data = peak_multi,
+    aes(y = predicted),
+    colour = "red",
+    size = 3
+  ) +
+
+  annotate(
+    "text",
+    x = peak_multi$weekly_dose,
+    y = peak_multi$predicted,
+    label = paste0(
+      "Peak dose\n",
+      round(peak_multi$weekly_dose, 1),
+      " METs/week"
+    ),
+    colour = "red",
+    hjust = -0.05,
+    vjust = -0.8
+  ) +
+
+  labs(
+    title = "Multicomponent interventions",
+    x = "Weekly physical activity dose (METs/week)",
+    y = "Change in balance performance"
+  ) +
+
+  theme_minimal()
+```
+
+
+
+### RELATIVE EFFECTS LEVEL 1
+
+```{r}
+
+
+library(dplyr)
+library(purrr)
+library(tibble)
+library(stringr)
+library(multinma)
+
+
+
+
+
+overall_outcomes <- list(
+
+  "Gait speed" =
+    pf_vmarcha,
+
+  "Lower-limb strength" =
+    pf_chair,
+
+  "Balance" =
+    pf_balance
+
+)
+
+
+
+prepare_overall_data <- function(
+  data,
+  outcome_name
+) {
+
+  
+
+  required_variables <- c(
+    "studyID",
+    "agent",
+    "y",
+    "se"
+  )
+
+  missing_variables <- setdiff(
+    required_variables,
+    names(data)
+  )
+
+  if (length(missing_variables) > 0) {
+
+    stop(
+      "En el outcome '",
+      outcome_name,
+      "' faltan las variables: ",
+      paste(
+        missing_variables,
+        collapse = ", "
+      )
+    )
+  }
+
+
+ 
+
+  data_overall <- data %>%
+    mutate(
+
+      studyID =
+        as.character(studyID),
+
+      agent =
+        str_to_lower(
+          str_trim(
+            as.character(agent)
+          )
+        ),
+
+      overall =
+        case_when(
+
+          agent %in% c(
+            "usual care",
+            "usual-care",
+            "usual_care",
+            "control",
+            "standard care"
+          ) ~
+            "usual care",
+
+          TRUE ~
+            "exercise"
+        )
+
+    ) %>%
+    filter(
+      !is.na(studyID),
+      !is.na(overall),
+      !is.na(y),
+      !is.na(se),
+      is.finite(y),
+      is.finite(se),
+      se > 0
+    )
+
+
+  
+
+
+  data_overall_combined <- data_overall %>%
+    mutate(
+      precision_weight =
+        1 / se^2
+    ) %>%
+    group_by(
+      studyID,
+      overall
+    ) %>%
+    summarise(
+
+      y =
+        sum(
+          y * precision_weight
+        ) /
+        sum(
+          precision_weight
+        ),
+
+      se =
+        sqrt(
+          1 /
+            sum(
+              precision_weight
+            )
+        ),
+
+      n_original_arms =
+        n(),
+
+      .groups = "drop"
+    ) %>%
+    mutate(
+      outcome =
+        outcome_name
+    )
+
+
+  
+
+  eligible_studies <- data_overall_combined %>%
+    group_by(studyID) %>%
+    summarise(
+
+      has_usual_care =
+        any(
+          overall == "usual care"
+        ),
+
+      has_exercise =
+        any(
+          overall == "exercise"
+        ),
+
+      .groups = "drop"
+    ) %>%
+    filter(
+      has_usual_care,
+      has_exercise
+    ) %>%
+    pull(studyID)
+
+
+  data_overall_combined <- data_overall_combined %>%
+    filter(
+      studyID %in% eligible_studies
+    ) %>%
+    mutate(
+
+      overall =
+        factor(
+          overall,
+          levels = c(
+            "usual care",
+            "exercise"
+          )
+        )
+    )
+
+
+ 
+
+  if (n_distinct(
+    data_overall_combined$studyID
+  ) == 0) {
+
+    stop(
+      "No existen estudios con comparación directa ",
+      "exercise vs usual care para el outcome '",
+      outcome_name,
+      "'."
+    )
+  }
+
+
+  return(
+    data_overall_combined
+  )
+}
+
+
+
+
+overall_data <- imap(
+  overall_outcomes,
+  ~ prepare_overall_data(
+    data = .x,
+    outcome_name = .y
+  )
+)
+
+
+
+overall_data_check <- imap_dfr(
+  overall_data,
+  function(
+    data,
+    outcome_name
+  ) {
+
+    data %>%
+      summarise(
+
+        outcome =
+          outcome_name,
+
+        n_studies =
+          n_distinct(studyID),
+
+        n_rows_combined =
+          n(),
+
+        n_usual_care_arms =
+          sum(
+            overall == "usual care"
+          ),
+
+        n_exercise_arms =
+          sum(
+            overall == "exercise"
+          ),
+
+        original_usual_care_arms =
+          sum(
+            n_original_arms[
+              overall == "usual care"
+            ]
+          ),
+
+        original_exercise_arms =
+          sum(
+            n_original_arms[
+              overall == "exercise"
+            ]
+          )
+      )
+  }
+)
+
+overall_data_check %>%
+  print(
+    n = Inf,
+    width = Inf
+  )
+
+
+
+fit_overall_model <- function(
+  data,
+  outcome_name,
+  trt_effects = "random"
+) {
+
+  ## Crear red de dos tratamientos
+
+  network <- set_agd_arm(
+
+    data = data,
+
+    study = studyID,
+
+    trt = overall,
+
+    y = y,
+
+    se = se,
+
+    trt_ref = "usual care"
+  )
+
+
+  ## Ajustar modelo NMA
+
+  model <- nma(
+
+    network,
+
+    trt_effects =
+      trt_effects,
+
+    consistency =
+      "consistency"
+  )
+
+
+  relative_effect <- relative_effects(
+
+    model,
+
+    trt_ref =
+      "usual care",
+
+    probs = c(
+      0.025,
+      0.5,
+      0.975
+    ),
+
+    summary = TRUE
+  )
+
+
+  return(
+    list(
+
+      outcome =
+        outcome_name,
+
+      data =
+        data,
+
+      network =
+        network,
+
+      model =
+        model,
+
+      relative_effect =
+        relative_effect
+    )
+  )
+}
+
+
+
+
+overall_models <- imap(
+  overall_data,
+  ~ fit_overall_model(
+    data = .x,
+    outcome_name = .y,
+    trt_effects = "random"
+  )
+)
+
+
+
+overall_models[
+  ["Gait speed"]
+]$relative_effect
+
+
+overall_models[
+  ["Lower-limb strength"]
+]$relative_effect
+
+
+overall_models[
+  ["Balance"]
+]$relative_effect
+
+
+
+
+extract_overall_effect <- function(
+  model_object
+) {
+
+  outcome_name <-
+    model_object$outcome
+
+
+
+
+  relative_table <- as.data.frame(
+    model_object$relative_effect
+  ) %>%
+    rownames_to_column(
+      var = "parameter"
+    )
+
+
+ 
+
+  exercise_row <- relative_table %>%
+    filter(
+      str_detect(
+        str_to_lower(parameter),
+        "exercise"
+      )
+    )
+
+
+  if (nrow(exercise_row) != 1) {
+
+    stop(
+      "No se ha podido identificar de forma única ",
+      "el efecto de exercise en el outcome '",
+      outcome_name,
+      "'. Parámetros encontrados: ",
+      paste(
+        relative_table$parameter,
+        collapse = "; "
+      )
+    )
+  }
+
+
+
+
+  exercise_result <- exercise_row %>%
+    transmute(
+
+      outcome =
+        outcome_name,
+
+      treatment =
+        "exercise",
+
+      reference =
+        "usual care",
+
+      relative_effect =
+        mean,
+
+      posterior_median =
+        `50%`,
+
+      CrI_low =
+        `2.5%`,
+
+      CrI_high =
+        `97.5%`,
+
+      posterior_sd =
+        sd,
+
+      Rhat =
+        Rhat,
+
+      Bulk_ESS =
+        Bulk_ESS,
+
+      Tail_ESS =
+        Tail_ESS
+    )
+
+
+
+
+  usual_care_result <- tibble(
+
+    outcome =
+      outcome_name,
+
+    treatment =
+      "usual care",
+
+    reference =
+      "usual care",
+
+    relative_effect =
+      0,
+
+    posterior_median =
+      0,
+
+    CrI_low =
+      0,
+
+    CrI_high =
+      0,
+
+    posterior_sd =
+      NA_real_,
+
+    Rhat =
+      NA_real_,
+
+    Bulk_ESS =
+      NA_real_,
+
+    Tail_ESS =
+      NA_real_
+  )
+
+
+  bind_rows(
+    usual_care_result,
+    exercise_result
+  )
+}
+
+
+
+overall_relative_effects <- map_dfr(
+  overall_models,
+  extract_overall_effect
+)
+
+
+overall_relative_effects %>%
+  print(
+    n = Inf,
+    width = Inf
+  )
+
+
+
+overall_relative_effects <- overall_relative_effects %>%
+  mutate(
+
+    statistically_significant =
+      case_when(
+
+        treatment == "usual care" ~
+          NA_character_,
+
+        CrI_low > 0 ~
+          "Favours exercise",
+
+        CrI_high < 0 ~
+          "Favours usual care",
+
+        TRUE ~
+          "No statistically significant difference"
+      )
+  )
+
+
+overall_relative_effects %>%
+  print(
+    n = Inf,
+    width = Inf
+  )
+
+
+
+overall_relative_effects_formatted <-
+  overall_relative_effects %>%
+  mutate(
+
+    treatment =
+      recode(
+        treatment,
+        "usual care" = "Usual care",
+        "exercise" = "Exercise"
+      ),
+
+    relative_effect_CrI =
+      case_when(
+
+        treatment == "Usual care" ~
+          "Reference",
+
+        TRUE ~
+          sprintf(
+            "%.2f (95%% CrI %.2f to %.2f)",
+            relative_effect,
+            CrI_low,
+            CrI_high
+          )
+      )
+  ) %>%
+  select(
+
+    Outcome =
+      outcome,
+
+    Treatment =
+      treatment,
+
+    `Relative effect (95% CrI)` =
+      relative_effect_CrI,
+
+    Interpretation =
+      statistically_significant
+  )
+
+
+overall_relative_effects_formatted %>%
+  print(
+    n = Inf,
+    width = Inf
+  )
+
+
+
+
+
+overall_exercise_vs_usual_care <-
+  overall_relative_effects %>%
+  filter(
+    treatment == "exercise"
+  ) %>%
+  mutate(
+
+    comparison =
+      "Exercise vs usual care",
+
+    relative_effect_CrI =
+      sprintf(
+        "%.2f (95%% CrI %.2f to %.2f)",
+        relative_effect,
+        CrI_low,
+        CrI_high
+      )
+  ) %>%
+  select(
+
+    Outcome =
+      outcome,
+
+    Comparison =
+      comparison,
+
+    `Relative effect` =
+      relative_effect,
+
+    `95% CrI lower` =
+      CrI_low,
+
+    `95% CrI upper` =
+      CrI_high,
+
+    `Relative effect (95% CrI)` =
+      relative_effect_CrI,
+
+    Interpretation =
+      statistically_significant,
+
+    Rhat,
+
+    Bulk_ESS,
+
+    Tail_ESS
+  )
+
+
+overall_exercise_vs_usual_care %>%
+  print(
+    n = Inf,
+    width = Inf
+  )
+
+
+
+
+overall_table_manuscript <-
+  overall_exercise_vs_usual_care %>%
+  select(
+
+    Outcome,
+
+    Comparison,
+
+    `Relative effect (95% CrI)`,
+
+    Interpretation
+  )
+
+
+overall_table_manuscript %>%
+  print(
+    n = Inf,
+    width = Inf
+  )
+```
+
+
+
+### Objective 2
+
+
+```{r}
+
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+
+studies_fall <- caida %>%
+  distinct(studyID) %>%
+  mutate(fall_risk = TRUE)
+
+studies_gait <- pf_vmarcha %>%
+  distinct(studyID) %>%
+  mutate(gait_speed = TRUE)
+
+studies_tug <- pf_tug %>%
+  distinct(studyID) %>%
+  mutate(TUG = TRUE)
+
+studies_chair <- pf_chair_stand %>%
+  distinct(studyID) %>%
+  mutate(chair_stand = TRUE)
+
+studies_balance <- pf_balance %>%
+  distinct(studyID) %>%
+  mutate(balance = TRUE)
+
+studies_cognition <- co_coglobal %>%
+  distinct(studyID) %>%
+  mutate(cognition = TRUE)
+
+
+
+study_domains <- full_join(studies_fall, studies_gait, by = "studyID") %>%
+  full_join(studies_tug, by = "studyID") %>%
+  full_join(studies_chair, by = "studyID") %>%
+  full_join(studies_balance, by = "studyID") %>%
+  full_join(studies_cognition, by = "studyID") %>%
+  mutate(
+    across(
+      c(
+        fall_risk,
+        gait_speed,
+        TUG,
+        chair_stand,
+        balance,
+        cognition
+      ),
+      ~ replace_na(.x, FALSE)
+    )
+  ) %>%
+  arrange(studyID)
+
+study_domains
+
+
+
+domain_counts <- study_domains %>%
+  summarise(
+    fall_risk = sum(fall_risk),
+    gait_speed = sum(gait_speed),
+    TUG = sum(TUG),
+    chair_stand = sum(chair_stand),
+    balance = sum(balance),
+    cognition = sum(cognition)
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "domain",
+    values_to = "n_studies"
+  )
+
+domain_counts
+
+
+
+fall_overlap <- tibble(
+  predictor = c(
+    "Gait speed",
+    "TUG",
+    "Chair-stand",
+    "Balance",
+    "Global cognition"
+  ),
+
+  n_studies_with_fall = c(
+    sum(study_domains$fall_risk & study_domains$gait_speed),
+    sum(study_domains$fall_risk & study_domains$TUG),
+    sum(study_domains$fall_risk & study_domains$chair_stand),
+    sum(study_domains$fall_risk & study_domains$balance),
+    sum(study_domains$fall_risk & study_domains$cognition)
+  )
+)
+
+fall_overlap
+
+
+
+fall_gait_studies <- study_domains %>%
+  filter(fall_risk, gait_speed) %>%
+  select(studyID)
+
+fall_tug_studies <- study_domains %>%
+  filter(fall_risk, TUG) %>%
+  select(studyID)
+
+fall_chair_studies <- study_domains %>%
+  filter(fall_risk, chair_stand) %>%
+  select(studyID)
+
+fall_balance_studies <- study_domains %>%
+  filter(fall_risk, balance) %>%
+  select(studyID)
+
+fall_cognition_studies <- study_domains %>%
+  filter(fall_risk, cognition) %>%
+  select(studyID)
+
+fall_gait_studies
+fall_tug_studies
+fall_chair_studies
+fall_balance_studies
+fall_cognition_studies
+
+
+
+study_domains <- study_domains %>%
+  mutate(
+    any_physical_function =
+      gait_speed |
+      TUG |
+      chair_stand |
+      balance,
+
+    n_physical_domains =
+      gait_speed +
+      TUG +
+      chair_stand +
+      balance
+  )
+
+fall_and_physical <- study_domains %>%
+  filter(
+    fall_risk,
+    any_physical_function
+  ) %>%
+  select(
+    studyID,
+    gait_speed,
+    TUG,
+    chair_stand,
+    balance,
+    cognition,
+    n_physical_domains
+  ) %>%
+  arrange(desc(n_physical_domains), studyID)
+
+fall_and_physical
+
+
+
+overlap_summary <- study_domains %>%
+  summarise(
+
+    n_fall = sum(fall_risk),
+
+    n_fall_any_physical =
+      sum(fall_risk & any_physical_function),
+
+    n_fall_cognition =
+      sum(fall_risk & cognition),
+
+    n_fall_physical_and_cognition =
+      sum(
+        fall_risk &
+        any_physical_function &
+        cognition
+      ),
+
+    n_fall_two_or_more_physical_domains =
+      sum(
+        fall_risk &
+        n_physical_domains >= 2
+      )
+  )
+
+overlap_summary
+
+
+fall_agent <- caida %>%
+  distinct(studyID, agent)
+
+gait_agent <- pf_vmarcha %>%
+  distinct(studyID, agent)
+
+tug_agent <- pf_tug %>%
+  distinct(studyID, agent)
+
+chair_agent <- pf_chair_stand %>%
+  distinct(studyID, agent)
+
+balance_agent <- pf_balance %>%
+  distinct(studyID, agent)
+
+cognition_agent <- co_coglobal %>%
+  distinct(studyID, agent)
+
+
+matched_fall_gait <- inner_join(
+  fall_agent,
+  gait_agent,
+  by = c("studyID", "agent")
+)
+
+matched_fall_tug <- inner_join(
+  fall_agent,
+  tug_agent,
+  by = c("studyID", "agent")
+)
+
+matched_fall_chair <- inner_join(
+  fall_agent,
+  chair_agent,
+  by = c("studyID", "agent")
+)
+
+matched_fall_balance <- inner_join(
+  fall_agent,
+  balance_agent,
+  by = c("studyID", "agent")
+)
+
+matched_fall_cognition <- inner_join(
+  fall_agent,
+  cognition_agent,
+  by = c("studyID", "agent")
+)
+
+
+matched_agent_summary <- tibble(
+
+  predictor = c(
+    "Gait speed",
+    "TUG",
+    "Chair-stand",
+    "Balance",
+    "Global cognition"
+  ),
+
+  n_matched_studies = c(
+    n_distinct(matched_fall_gait$studyID),
+    n_distinct(matched_fall_tug$studyID),
+    n_distinct(matched_fall_chair$studyID),
+    n_distinct(matched_fall_balance$studyID),
+    n_distinct(matched_fall_cognition$studyID)
+  ),
+
+  n_matched_study_agent_pairs = c(
+    nrow(matched_fall_gait),
+    nrow(matched_fall_tug),
+    nrow(matched_fall_chair),
+    nrow(matched_fall_balance),
+    nrow(matched_fall_cognition)
+  )
+)
+
+matched_agent_summary
+
+matched_fall_gait
+matched_fall_tug
+matched_fall_chair
+matched_fall_balance
+matched_fall_cognition
+
+
+fall_overlap
+overlap_summary
+matched_agent_summary
+
+```
+
+
+### 2. standarized vs usual care
+```{r}
+
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+
+make_standardised_contrasts <- function(dat, direction = 1) {
+
+  dat_std <- dat %>%
+    mutate(
+      y_analysis = direction * as.numeric(y),
+      se_analysis = as.numeric(se),
+      n_analysis = as.numeric(postn),
+
+      sd_change = se_analysis * sqrt(n_analysis)
+    ) %>%
+    filter(
+      !is.na(y_analysis),
+      !is.na(se_analysis),
+      !is.na(n_analysis),
+      n_analysis > 1,
+      !is.na(sd_change),
+      sd_change > 0
+    ) %>%
+
+    group_by(studyID) %>%
+
+    mutate(
+      df_pool = sum(n_analysis - 1),
+
+      pooled_sd = sqrt(
+        sum(
+          (n_analysis - 1) * sd_change^2
+        ) /
+        df_pool
+      ),
+
+      J = exp(
+        lgamma(df_pool / 2) -
+          0.5 * log(df_pool / 2) -
+          lgamma((df_pool - 1) / 2)
+      ),
+
+      std_arm_change =
+        J * y_analysis / pooled_sd,
+
+      std_arm_se =
+        J * se_analysis / pooled_sd
+    ) %>%
+    ungroup()
+
+
+  dat_with_uc <- dat_std %>%
+    group_by(studyID) %>%
+    filter(any(agent == "usual care")) %>%
+    ungroup()
+
+  uc <- dat_with_uc %>%
+    filter(agent == "usual care") %>%
+    select(
+      studyID,
+      uc_change = std_arm_change,
+      uc_se = std_arm_se
+    )
+
+  active <- dat_with_uc %>%
+    filter(agent != "usual care") %>%
+    select(
+      studyID,
+      agent,
+      std_arm_change,
+      std_arm_se
+    )
+
+  contrasts <- active %>%
+    inner_join(
+      uc,
+      by = "studyID",
+      relationship = "many-to-many"
+    ) %>%
+    mutate(
+      effect = std_arm_change - uc_change,
+
+      se_effect = sqrt(
+        std_arm_se^2 +
+          uc_se^2
+      )
+    ) %>%
+    select(
+      studyID,
+      agent,
+      effect,
+      se_effect
+    )
+
+  contrasts
+}
+
+
+```
+
+### 3. 4 contrast
+
+```{r}
+
+contrast_fall <- make_standardised_contrasts(
+  caida,
+  direction = 1
+) %>%
+  rename(
+    effect_fall = effect,
+    se_fall = se_effect
+  )
+
+
+
+contrast_tug <- make_standardised_contrasts(
+  pf_tug,
+  direction = -1
+) %>%
+  rename(
+    effect_tug = effect,
+    se_tug = se_effect
+  )
+
+
+
+contrast_gait <- make_standardised_contrasts(
+  pf_vmarcha,
+  direction = 1
+) %>%
+  rename(
+    effect_gait = effect,
+    se_gait = se_effect
+  )
+
+
+uc_chair <- pf_chair_stand_std %>%
+  filter(agent == "usual care") %>%
+  select(
+    studyID,
+    uc_change = standardised_arm_change,
+    uc_se = standardised_arm_se
+  )
+
+active_chair <- pf_chair_stand_std %>%
+  filter(agent != "usual care") %>%
+  select(
+    studyID,
+    agent,
+    standardised_arm_change,
+    standardised_arm_se
+  )
+
+contrast_chair <- active_chair %>%
+  inner_join(
+    uc_chair,
+    by = "studyID",
+    relationship = "many-to-many"
+  ) %>%
+  mutate(
+    effect_chair =
+      standardised_arm_change - uc_change,
+
+    se_chair = sqrt(
+      standardised_arm_se^2 +
+        uc_se^2
+    )
+  ) %>%
+  select(
+    studyID,
+    agent,
+    effect_chair,
+    se_chair
+  )
+
+```
+
+### 4.  fall-risk with 3 variables
+
+```{r}
+
+assoc_fall_tug <- contrast_fall %>%
+  inner_join(
+    contrast_tug,
+    by = c("studyID", "agent")
+  )
+
+assoc_fall_chair <- contrast_fall %>%
+  inner_join(
+    contrast_chair,
+    by = c("studyID", "agent")
+  )
+
+assoc_fall_gait <- contrast_fall %>%
+  inner_join(
+    contrast_gait,
+    by = c("studyID", "agent")
+  )
+
+
+```
+
+### 5. BASIC CHECKS
+```{r}
+
+association_sample_summary <- tibble(
+
+  domain = c(
+    "TUG / functional mobility",
+    "Chair-stand / lower-limb strength",
+    "Gait speed"
+  ),
+
+  n_effect_pairs = c(
+    nrow(assoc_fall_tug),
+    nrow(assoc_fall_chair),
+    nrow(assoc_fall_gait)
+  ),
+
+  n_studies = c(
+    n_distinct(assoc_fall_tug$studyID),
+    n_distinct(assoc_fall_chair$studyID),
+    n_distinct(assoc_fall_gait$studyID)
+  )
+)
+
+association_sample_summary
+
+assoc_fall_tug %>%
+  count(studyID, agent) %>%
+  filter(n > 1)
+
+assoc_fall_chair %>%
+  count(studyID, agent) %>%
+  filter(n > 1)
+
+assoc_fall_gait %>%
+  count(studyID, agent) %>%
+  filter(n > 1)
+
+summary(assoc_fall_tug$effect_fall)
+summary(assoc_fall_tug$effect_tug)
+
+summary(assoc_fall_chair$effect_fall)
+summary(assoc_fall_chair$effect_chair)
+
+summary(assoc_fall_gait$effect_fall)
+summary(assoc_fall_gait$effect_gait)
+
+ggplot(
+  assoc_fall_tug,
+  aes(
+    x = effect_tug,
+    y = effect_fall
+  )
+) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    se = TRUE
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    x = "Standardised improvement in TUG",
+    y = "Standardised improvement in fall-risk-related performance",
+    title = "Functional mobility and fall-risk-related performance"
+  ) +
+  theme_minimal()
+
+ggplot(
+  assoc_fall_chair,
+  aes(
+    x = effect_chair,
+    y = effect_fall
+  )
+) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    se = TRUE
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    x = "Standardised improvement in lower-limb functional strength",
+    y = "Standardised improvement in fall-risk-related performance",
+    title = "Lower-limb functional strength and fall-risk-related performance"
+  ) +
+  theme_minimal()
+
+ggplot(
+  assoc_fall_gait,
+  aes(
+    x = effect_gait,
+    y = effect_fall
+  )
+) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    se = TRUE
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed"
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed"
+  ) +
+  labs(
+    x = "Standardised improvement in gait speed",
+    y = "Standardised improvement in fall-risk-related performance",
+    title = "Gait speed and fall-risk-related performance"
+  ) +
+  theme_minimal()
+
+
+
+association_sample_summary
+assoc_fall_tug %>% count(studyID, agent) %>% filter(n > 1)
+assoc_fall_chair %>% count(studyID, agent) %>% filter(n > 1)
+assoc_fall_gait %>% count(studyID, agent) %>% filter(n > 1)
+```
+
+### 6. variables modulation
+
+```{r}
+
+library(metafor)
+
+
+model_fall_tug <- rma(
+  yi = effect_fall,
+  sei = se_fall,
+  mods = ~ effect_tug,
+  method = "REML",
+  data = assoc_fall_tug
+)
+
+summary(model_fall_tug)
+
+
+model_fall_chair <- rma(
+  yi = effect_fall,
+  sei = se_fall,
+  mods = ~ effect_chair,
+  method = "REML",
+  data = assoc_fall_chair
+)
+
+summary(model_fall_chair)
+
+
+
+tibble(
+  analysis = c(
+    "Fall-risk vs TUG",
+    "Fall-risk vs chair-stand"
+  ),
+  n_studies = c(
+    n_distinct(assoc_fall_tug$studyID),
+    n_distinct(assoc_fall_chair$studyID)
+  ),
+  beta = c(
+    coef(model_fall_tug)[2],
+    coef(model_fall_chair)[2]
+  ),
+  p_value = c(
+    coef(summary(model_fall_tug))[2, "pval"],
+    coef(summary(model_fall_chair))[2, "pval"]
+  )
+)
+
+
+
+
+confint(model_fall_tug)
+confint(model_fall_chair)
+coef(summary(model_fall_tug))
+
+
+coef(summary(model_fall_chair))
+
+
+
+
+x_tug <- seq(
+  min(assoc_fall_tug$effect_tug, na.rm = TRUE),
+  max(assoc_fall_tug$effect_tug, na.rm = TRUE),
+  length.out = 200
+)
+
+pred_tug <- predict(
+  model_fall_tug,
+  newmods = x_tug
+)
+
+pred_df_tug <- tibble(
+  effect_tug = x_tug,
+  pred = pred_tug$pred,
+  ci_lb = pred_tug$ci.lb,
+  ci_ub = pred_tug$ci.ub
+)
+
+p_fall_tug_final <- ggplot(
+  assoc_fall_tug,
+  aes(
+    x = effect_tug,
+    y = effect_fall
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_ribbon(
+    data = pred_df_tug,
+    aes(
+      x = effect_tug,
+      ymin = ci_lb,
+      ymax = ci_ub
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.20
+  ) +
+  geom_line(
+    data = pred_df_tug,
+    aes(
+      x = effect_tug,
+      y = pred
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  geom_point(
+    aes(
+      size = 1 / se_fall^2
+    ),
+    alpha = 0.75
+  ) +
+  scale_size_continuous(
+    name = "Inverse-variance weight",
+    range = c(2.5, 7)
+  ) +
+  labs(
+    x = "Standardised improvement in functional mobility (TUG)",
+    y = "Standardised improvement in fall-risk-related performance",
+    title = "Functional mobility and fall-risk-related performance",
+    subtitle = paste0(
+      "Study-level meta-regression: \u03b2 = 0.78 ",
+      "(95% CI 0.43 to 1.12), p < 0.001"
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right"
+  )
+
+p_fall_tug_final
+
+
+x_chair <- seq(
+  min(assoc_fall_chair$effect_chair, na.rm = TRUE),
+  max(assoc_fall_chair$effect_chair, na.rm = TRUE),
+  length.out = 200
+)
+
+pred_chair <- predict(
+  model_fall_chair,
+  newmods = x_chair
+)
+
+pred_df_chair <- tibble(
+  effect_chair = x_chair,
+  pred = pred_chair$pred,
+  ci_lb = pred_chair$ci.lb,
+  ci_ub = pred_chair$ci.ub
+)
+
+p_fall_chair_final <- ggplot(
+  assoc_fall_chair,
+  aes(
+    x = effect_chair,
+    y = effect_fall
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_ribbon(
+    data = pred_df_chair,
+    aes(
+      x = effect_chair,
+      ymin = ci_lb,
+      ymax = ci_ub
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.20
+  ) +
+  geom_line(
+    data = pred_df_chair,
+    aes(
+      x = effect_chair,
+      y = pred
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  geom_point(
+    aes(
+      size = 1 / se_fall^2
+    ),
+    alpha = 0.75
+  ) +
+  scale_size_continuous(
+    name = "Inverse-variance weight",
+    range = c(2.5, 7)
+  ) +
+  labs(
+    x = "Standardised improvement in lower-limb functional strength",
+    y = "Standardised improvement in fall-risk-related performance",
+    title = "Lower-limb functional strength and fall-risk-related performance",
+    subtitle = paste0(
+      "Study-level meta-regression: \u03b2 = 1.05 ",
+      "(95% CI 0.23 to 1.87), p = 0.012"
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right"
+  )
+
+p_fall_chair_final
+
+
+
+library(patchwork)
+
+p_function_fall <- p_fall_tug_final + p_fall_chair_final +
+  plot_annotation(
+    title = "Association between exercise-induced improvements in physical function and fall-risk-related performance"
+  )
+
+p_function_fall
+
+
+gait_std <- pf_vmarcha %>%
+  mutate(
+    y_analysis = as.numeric(y),
+    se_analysis = as.numeric(se),
+    n_analysis = as.numeric(postn),
+
+    sd_change = se_analysis * sqrt(n_analysis)
+  ) %>%
+  filter(
+    !is.na(y_analysis),
+    !is.na(se_analysis),
+    !is.na(n_analysis),
+    n_analysis > 1,
+    !is.na(sd_change),
+    sd_change > 0
+  ) %>%
+
+  group_by(studyID, scale) %>%
+  mutate(
+    df_pool = sum(n_analysis - 1),
+
+    pooled_sd = sqrt(
+      sum(
+        (n_analysis - 1) * sd_change^2
+      ) /
+        df_pool
+    ),
+
+    J = exp(
+      lgamma(df_pool / 2) -
+        0.5 * log(df_pool / 2) -
+        lgamma((df_pool - 1) / 2)
+    ),
+
+    std_arm_change =
+      J * y_analysis / pooled_sd,
+
+    std_arm_se =
+      J * se_analysis / pooled_sd
+  ) %>%
+  ungroup()
+
+uc_gait <- gait_std %>%
+  filter(agent == "usual care") %>%
+  select(
+    studyID,
+    scale,
+    uc_change = std_arm_change,
+    uc_se = std_arm_se
+  )
+
+
+active_gait <- gait_std %>%
+  filter(agent != "usual care") %>%
+  select(
+    studyID,
+    scale,
+    agent,
+    trt,
+    active_change = std_arm_change,
+    active_se = std_arm_se
+  )
+
+contrast_gait_correct <- active_gait %>%
+  inner_join(
+    uc_gait,
+    by = c("studyID", "scale")
+  ) %>%
+  mutate(
+    effect_gait =
+      active_change - uc_change,
+
+    se_gait = sqrt(
+      active_se^2 +
+        uc_se^2
+    )
+  ) %>%
+  select(
+    studyID,
+    scale,
+    agent,
+    trt,
+    effect_gait,
+    se_gait
+  )
+
+contrast_gait_correct %>%
+  filter(studyID == "Arrieta, 2018")
+
+
+contrast_gait_unique <- contrast_gait_correct %>%
+  group_by(
+    studyID,
+    agent
+  ) %>%
+  summarise(
+    effect_gait = mean(
+      effect_gait,
+      na.rm = TRUE
+    ),
+
+    se_gait = sqrt(
+      sum(se_gait^2, na.rm = TRUE)
+    ) / n(),
+
+    n_gait_measures = n(),
+
+    .groups = "drop"
+  )
+
+assoc_fall_gait <- contrast_fall %>%
+  inner_join(
+    contrast_gait_unique,
+    by = c(
+      "studyID",
+      "agent"
+    )
+  )
+
+assoc_fall_gait %>%
+  select(
+    studyID,
+    agent,
+    effect_fall,
+    se_fall,
+    effect_gait,
+    se_gait,
+    n_gait_measures
+  )
+
+assoc_fall_gait %>%
+  summarise(
+    n_effect_pairs = n(),
+    n_studies = n_distinct(studyID)
+  )
+
+
+model_fall_gait <- metafor::rma(
+  yi = effect_fall,
+  sei = se_fall,
+  mods = ~ effect_gait,
+  method = "REML",
+  test = "knha",
+  data = assoc_fall_gait
+)
+
+summary(model_fall_gait)
+
+coef(summary(model_fall_gait))
+
+model_fall_gait$R2
+
+tibble(
+  analysis = "Fall-risk vs gait speed",
+  n_studies = n_distinct(assoc_fall_gait$studyID),
+  beta = coef(model_fall_gait)[2],
+  ci_lower = confint(model_fall_gait, fixed = TRUE)$fixed[2, "ci.lb"],
+  ci_upper = confint(model_fall_gait, fixed = TRUE)$fixed[2, "ci.ub"]
+)
+
+
+
+x_gait <- seq(
+  min(assoc_fall_gait$effect_gait, na.rm = TRUE),
+  max(assoc_fall_gait$effect_gait, na.rm = TRUE),
+  length.out = 200
+)
+
+pred_gait <- predict(
+  model_fall_gait,
+  newmods = x_gait
+)
+
+pred_df_gait <- tibble(
+  effect_gait = x_gait,
+  pred = pred_gait$pred,
+  ci_lb = pred_gait$ci.lb,
+  ci_ub = pred_gait$ci.ub
+)
+
+p_fall_gait_final <- ggplot(
+  assoc_fall_gait,
+  aes(
+    x = effect_gait,
+    y = effect_fall
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.5
+  ) +
+  geom_ribbon(
+    data = pred_df_gait,
+    aes(
+      x = effect_gait,
+      ymin = ci_lb,
+      ymax = ci_ub
+    ),
+    inherit.aes = FALSE,
+    alpha = 0.20
+  ) +
+  geom_line(
+    data = pred_df_gait,
+    aes(
+      x = effect_gait,
+      y = pred
+    ),
+    inherit.aes = FALSE,
+    linewidth = 1
+  ) +
+  geom_point(
+    aes(
+      size = 1 / se_fall^2
+    ),
+    alpha = 0.75
+  ) +
+  scale_size_continuous(
+    name = "Inverse-variance weight",
+    range = c(2.5, 7)
+  ) +
+  labs(
+    x = "Standardised improvement in gait speed",
+    y = "Standardised improvement in fall-risk-related performance",
+    title = "Gait speed and fall-risk-related performance",
+    subtitle = paste0(
+      "Exploratory study-level meta-regression: \u03b2 = 0.34 ",
+      "(95% CI -0.32 to 1.00), p = 0.157"
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right"
+  )
+
+p_fall_gait_final
+
+
+
+
+
+```
+
+
+### 7. number studies analysis
+
+```{r}
+
+install.packages("officer")
+install.packages("flextable")
+library(dplyr)
+library(officer)
+library(flextable)
+
+
+
+summarise_agent_support <- function(dat, outcome_name) {
+
+  dat %>%
+    group_by(agent) %>%
+    summarise(
+      outcome = outcome_name,
+      n_studies = n_distinct(studyID),
+      n_arms = n(),
+      n_participants = sum(postn, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(
+      desc(n_studies),
+      desc(n_arms)
+    )
+}
+
+
+summarise_trt_support <- function(dat, outcome_name) {
+
+  dat %>%
+    group_by(trt) %>%
+    summarise(
+      outcome = outcome_name,
+      n_studies = n_distinct(studyID),
+      n_arms = n(),
+      n_participants = sum(postn, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(
+      desc(n_studies),
+      desc(n_arms)
+    )
+}
+
+
+
+support_agent_tug <- summarise_agent_support(
+  pf_tug,
+  "Functional mobility (TUG)"
+)
+
+support_agent_chair <- summarise_agent_support(
+  pf_chair_stand,
+  "Lower-limb functional strength"
+)
+
+support_agent_gait <- summarise_agent_support(
+  pf_vmarcha,
+  "Gait speed"
+)
+
+support_agent_balance <- summarise_agent_support(
+  pf_balance,
+  "Balance"
+)
+
+
+
+support_agent_all <- bind_rows(
+  support_agent_tug,
+  support_agent_chair,
+  support_agent_gait,
+  support_agent_balance
+) %>%
+  select(
+    outcome,
+    agent,
+    n_studies,
+    n_arms,
+    n_participants
+  ) %>%
+  mutate(
+    evidence_support = case_when(
+      n_studies == 1 ~ "Single study",
+      n_studies == 2 ~ "Very limited",
+      n_studies <= 4 ~ "Limited",
+      n_studies >= 5 ~ "Broader evidence"
+    )
+  )
+
+
+
+support_trt_tug <- summarise_trt_support(
+  pf_tug,
+  "Functional mobility (TUG)"
+)
+
+support_trt_chair <- summarise_trt_support(
+  pf_chair_stand,
+  "Lower-limb functional strength"
+)
+
+support_trt_gait <- summarise_trt_support(
+  pf_vmarcha,
+  "Gait speed"
+)
+
+support_trt_balance <- summarise_trt_support(
+  pf_balance,
+  "Balance"
+)
+
+
+
+support_trt_all <- bind_rows(
+  support_trt_tug,
+  support_trt_chair,
+  support_trt_gait,
+  support_trt_balance
+) %>%
+  select(
+    outcome,
+    trt,
+    n_studies,
+    n_arms,
+    n_participants
+  ) %>%
+  mutate(
+    evidence_support = case_when(
+      n_studies == 1 ~ "Single study",
+      n_studies == 2 ~ "Very limited",
+      n_studies <= 4 ~ "Limited",
+      n_studies >= 5 ~ "Broader evidence"
+    )
+  )
+
+
+
+support_agent_all
+support_trt_all
+
+
+
+ft_agent <- flextable(
+  support_agent_all
+) %>%
+  set_header_labels(
+    outcome = "Outcome",
+    agent = "Exercise category",
+    n_studies = "Studies",
+    n_arms = "Arms",
+    n_participants = "Participants",
+    evidence_support = "Evidence support"
+  ) %>%
+  bold(
+    part = "header"
+  ) %>%
+  align(
+    align = "center",
+    part = "all"
+  ) %>%
+  align(
+    j = c(
+      "outcome",
+      "agent",
+      "evidence_support"
+    ),
+    align = "left",
+    part = "body"
+  ) %>%
+  autofit()
+
+
+ft_trt <- flextable(
+  support_trt_all
+) %>%
+  set_header_labels(
+    outcome = "Outcome",
+    trt = "Specific treatment",
+    n_studies = "Studies",
+    n_arms = "Arms",
+    n_participants = "Participants",
+    evidence_support = "Evidence support"
+  ) %>%
+  bold(
+    part = "header"
+  ) %>%
+  align(
+    align = "center",
+    part = "all"
+  ) %>%
+  align(
+    j = c(
+      "outcome",
+      "trt",
+      "evidence_support"
+    ),
+    align = "left",
+    part = "body"
+  ) %>%
+  autofit()
+
+
+
+doc <- read_docx()
+
+doc <- doc %>%
+
+  body_add_par(
+    "Evidence support for physical-function outcomes",
+    style = "heading 1"
+  ) %>%
+
+  body_add_par(
+    "Evidence support by broad exercise category",
+    style = "heading 2"
+  ) %>%
+
+  body_add_flextable(
+    ft_agent
+  ) %>%
+
+  body_add_par(
+    "",
+    style = "Normal"
+  ) %>%
+
+  body_add_par(
+    "Evidence support by specific treatment",
+    style = "heading 2"
+  ) %>%
+
+  body_add_flextable(
+    ft_trt
+  )
+
+
+
+output_file <- file.path(
+  path.expand("~/Desktop"),
+  "Physical_function_evidence_support.docx"
+)
+
+print(
+  doc,
+  target = output_file
+)
+
+
+
+cat(
+  "\nWord file saved at:\n",
+  output_file,
+  "\n\n"
+)
+
+cat(
+  "File exists: ",
+  file.exists(output_file),
+  "\n"
+)
+
+```
+
